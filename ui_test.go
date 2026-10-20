@@ -788,6 +788,28 @@ func TestTaskDetailScrollsAndResetsOnSelection(t *testing.T) {
 	}
 }
 
+func TestTaskDetailScrollProgress(t *testing.T) {
+	m := model{}
+	longTask := task{Name: "Long task", Note: strings.Repeat("line\n\n", 40)}
+	const width, height = 40, 16
+	last := len(m.taskDetailLines(longTask, width)) - (height - 1)
+	for _, offset := range []int{0, last / 2, last, last + 100} {
+		m.detailScroll = offset
+		view := strings.Split(ansi.Strip(m.taskDetailView(longTask, width, height)), "\n")
+		indicator := view[0]
+		percent := min(offset, last) * 100 / last
+		if len(view) != height || lipgloss.Width(indicator) != width || !strings.HasSuffix(indicator, fmt.Sprintf("%3d%%", percent)) {
+			t.Fatalf("offset %d: incorrect progress indicator %q", offset, indicator)
+		}
+		if strings.Count(indicator, "━") != (width-8)*percent/100 {
+			t.Fatalf("offset %d: incorrect progress bar %q", offset, indicator)
+		}
+	}
+	if strings.Contains(ansi.Strip(m.taskDetailView(task{Name: "Short"}, width, height)), "%") {
+		t.Fatal("short content should not show a scroll indicator")
+	}
+}
+
 func TestCalendarKeepsStatusAndPlansDatedTask(t *testing.T) {
 	m := model{}
 	m.openNew()
@@ -1081,6 +1103,221 @@ func TestLoadingAnimationLifecycle(t *testing.T) {
 		m = updated.(model)
 		if !m.loading || cmd == nil {
 			t.Fatal("refresh should restart loading")
+		}
+	}
+}
+
+func TestTaskSearchFiltersAndNavigation(t *testing.T) {
+	m := model{page: pageAll, width: 100, height: 24, selectedProjectUID: "p", projects: []project{{ID: 1, UID: "p"}}, priorityFilter: "high", statusFilter: "in_progress", tagFilters: map[string]bool{"work": true}, tasks: []task{
+		{ID: 1, Name: "First MATCH", ProjectID: 1, Priority: "high", Status: "in_progress", Tags: []tag{{Name: "Work"}}},
+		{ID: 2, Name: "Second", Note: "match in description", ProjectID: 1, Priority: "high", Status: "in_progress", Tags: []tag{{Name: "Work"}}},
+		{ID: 3, Name: "Match wrong priority", ProjectID: 1, Priority: "low", Status: "in_progress", Tags: []tag{{Name: "Work"}}},
+		{ID: 4, Name: "Match wrong project", ProjectID: 2, Priority: "high", Status: "in_progress", Tags: []tag{{Name: "Work"}}},
+		{ID: 5, Name: "Match wrong status", ProjectID: 1, Priority: "high", Tags: []tag{{Name: "Work"}}},
+		{ID: 6, Name: "Match wrong tag", ProjectID: 1, Priority: "high", Status: "in_progress"},
+	}}
+	press := func(key tea.KeyMsg) { updated, _ := m.Update(key); m = updated.(model) }
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/")})
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("MATCH")})
+	if got := m.searchResults(); len(got) != 2 {
+		t.Fatalf("filtered results: %#v", got)
+	}
+	press(tea.KeyMsg{Type: tea.KeyDown})
+	if m.search.cursor != 1 {
+		t.Fatal("down should select second result")
+	}
+	view := m.searchView()
+	for _, line := range strings.Split(m.taskListItem(m.tasks[1], 60, true), "\n") {
+		if !strings.Contains(view, line) {
+			t.Fatal("results must reuse selected task rendering")
+		}
+	}
+	press(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.editor == nil || !m.editor.readOnly || m.editor.task.ID != 2 {
+		t.Fatal("enter should open selected task in view mode")
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "View task") {
+		t.Fatal("view popup missing")
+	}
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	if m.editor.readOnly {
+		t.Fatal("e should enable editing")
+	}
+	m.editor.fields[0].SetValue("Unsaved change")
+	press(tea.KeyMsg{Type: tea.KeyEsc})
+	if !m.editor.readOnly || m.editor.fields[0].Value() != "Second" {
+		t.Fatal("escape should discard edits and return to view")
+	}
+	press(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.editor != nil || m.search == nil || m.search.cursor != 1 || m.search.input.Value() != "MATCH" {
+		t.Fatal("escape should restore search and selection")
+	}
+	press(tea.KeyMsg{Type: tea.KeyUp})
+	if m.search.cursor != 0 {
+		t.Fatal("up should select first result")
+	}
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("missing")})
+	if len(m.searchResults()) != 0 || m.search.cursor != 0 {
+		t.Fatal("typing should update results and reset selection")
+	}
+	press(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.editor != nil {
+		t.Fatal("empty results should not open editor")
+	}
+	press(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.search != nil {
+		t.Fatal("escape should close search")
+	}
+}
+
+func TestTaskSearchRespectsDateFilterAndScrolls(t *testing.T) {
+	m := model{page: pageCalendar, lastFilter: "upcoming", width: 80, height: 20, search: &taskSearch{input: input("", "Search")}}
+	m.tasks = append(m.tasks, task{Name: "Unplanned"})
+	for i := range 20 {
+		m.tasks = append(m.tasks, task{ID: i + 1, Name: fmt.Sprintf("Task %02d", i), DueDate: time.Now().AddDate(0, 0, i+1).Format(time.RFC3339)})
+	}
+	if len(m.searchResults()) != 20 {
+		t.Fatal("search should retain last selected date filter")
+	}
+	m.search.cursor = 19
+	view := m.searchView()
+	if !strings.Contains(ansi.Strip(view), "Task 19") || lipgloss.Height(view) > m.height {
+		t.Fatal("selected result should remain visible within terminal")
+	}
+	m.search.cursor = 0
+	updated, _ := m.updateSearch(tea.KeyMsg{Type: tea.KeyUp})
+	if updated.(model).search.cursor != 0 {
+		t.Fatal("up should stay within results")
+	}
+}
+
+func TestTaskSearchSaveReturnsToUpdatedView(t *testing.T) {
+	original := task{ID: 7, UID: "task", Name: "Original"}
+	m := model{page: pageAll, search: &taskSearch{input: input("", "Search")}}
+	m.openTaskEditor(original)
+	updated, _ := m.Update(actionMsg{})
+	m = updated.(model)
+	if m.editor == nil || !m.editor.readOnly || m.search == nil {
+		t.Fatal("save should return to task view within search")
+	}
+	saved := original
+	saved.Name = "Saved title"
+	updated, _ = m.Update(loadedMsg{tasks: []task{saved}})
+	m = updated.(model)
+	if m.editor.task.Name != "Saved title" || !m.editor.readOnly {
+		t.Fatal("task view should show refreshed saved data")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(model)
+	if got := m.searchResults(); len(got) != 1 || got[0].Name != "Saved title" {
+		t.Fatal("results should use refreshed data")
+	}
+}
+
+func TestTaskSearchAllTasksCheckbox(t *testing.T) {
+	m := model{page: pageUnplanned, width: 80, height: 20, selectedProjectUID: "p", projects: []project{{ID: 1, UID: "p"}}, priorityFilter: "high", statusFilter: "in_progress", tagFilters: map[string]bool{"work": true}, search: &taskSearch{input: input("match", "Search")}, tasks: []task{
+		{ID: 1, Name: "Match filtered", ProjectID: 1, Priority: "high", Status: "in_progress", Tags: []tag{{Name: "work"}}},
+		{ID: 2, Name: "Match completed", Status: "done", DueDate: "2027-01-01"},
+		{ID: 3, Name: "Other", Status: "done"},
+	}}
+	m.search.input.Focus()
+	press := func(key tea.KeyMsg) { updated, _ := m.Update(key); m = updated.(model) }
+	if len(m.searchResults()) != 1 {
+		t.Fatal("search should initially use filters")
+	}
+	press(tea.KeyMsg{Type: tea.KeyTab})
+	if !m.search.focusAll || m.search.input.Focused() {
+		t.Fatal("tab should focus checkbox")
+	}
+	press(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(" ")})
+	if !m.search.allTasks || len(m.searchResults()) != 2 || m.search.input.Value() != "match" {
+		t.Fatal("checkbox should bypass every filter while keeping the query")
+	}
+	if !strings.Contains(ansi.Strip(m.searchView()), "[x] all tasks") || lipgloss.Height(m.searchView()) > m.height {
+		t.Fatal("checkbox should be visible within terminal")
+	}
+	press(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.search.allTasks || len(m.searchResults()) != 1 || m.editor != nil {
+		t.Fatal("enter on checkbox should restore filters")
+	}
+	press(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.search.focusAll || !m.search.input.Focused() {
+		t.Fatal("shift-tab should return to search input")
+	}
+	if m.selectedProjectUID != "p" || m.priorityFilter != "high" || m.statusFilter != "in_progress" || !m.tagFilters["work"] || m.page != pageUnplanned {
+		t.Fatal("all tasks must preserve selected filters")
+	}
+}
+
+func TestTaskSearchPopupPositionStaysFixed(t *testing.T) {
+	for _, height := range []int{20, 24, 40} {
+		m := model{page: pageAll, width: 100, height: height, search: &taskSearch{input: input("", "Search")}}
+		for i := range 30 {
+			m.tasks = append(m.tasks, task{Name: fmt.Sprintf("Task %02d", i)})
+		}
+		var top, bottom, fieldRow, hintRow int
+		for i, query := range []string{"", "Task 01", "missing"} {
+			m.search.input.SetValue(query)
+			view := ansi.Strip(m.searchView())
+			if lipgloss.Height(view) != height {
+				t.Fatalf("height %d: popup exceeds available space", height)
+			}
+			var gotTop, gotBottom, gotField, gotHint int
+			for row, line := range strings.Split(view, "\n") {
+				if strings.Contains(line, "╭") {
+					gotTop = row
+				}
+				if strings.Contains(line, "╰") {
+					gotBottom = row
+				}
+				if strings.Contains(line, "[ ] all tasks") {
+					gotField = row
+				}
+				if strings.Contains(line, "tab focus") {
+					gotHint = row
+				}
+			}
+			if i == 0 {
+				top, bottom, fieldRow, hintRow = gotTop, gotBottom, gotField, gotHint
+			} else if top != gotTop || bottom != gotBottom || fieldRow != gotField || hintRow != gotHint {
+				t.Fatalf("height %d: layout moved for query %q", height, query)
+			}
+			if bottom-top+1 != height-4 {
+				t.Fatalf("height %d: popup should use available height", height)
+			}
+		}
+	}
+}
+
+func TestTaskSearchCheckboxAndResultsHighlightAreExclusive(t *testing.T) {
+	for _, arrow := range []tea.KeyType{tea.KeyUp, tea.KeyDown} {
+		m := model{page: pageAll, width: 100, height: 24, search: &taskSearch{input: input("", "Search"), cursor: 1}, tasks: []task{{Name: "First"}, {Name: "Second"}, {Name: "Third"}}}
+		press := func(key tea.KeyMsg) { updated, _ := m.Update(key); m = updated.(model) }
+		hasItem := func(active bool) bool {
+			for _, line := range strings.Split(m.taskListItem(m.tasks[1], 60, active), "\n") {
+				if !strings.Contains(m.searchView(), line) {
+					return false
+				}
+			}
+			return true
+		}
+		press(tea.KeyMsg{Type: tea.KeyTab})
+		if !m.search.focusAll || !hasItem(false) {
+			t.Fatal("checkbox focus should remove task highlight")
+		}
+		if !strings.Contains(m.searchView(), selected.Render("[ ] all tasks")) {
+			t.Fatal("checkbox should be highlighted")
+		}
+		press(tea.KeyMsg{Type: arrow})
+		if m.search.focusAll || m.search.cursor != 1 || !hasItem(true) {
+			t.Fatal("arrow should restore highlight to current result")
+		}
+		if !strings.Contains(m.searchView(), dim.Render("[ ] all tasks")) {
+			t.Fatal("checkbox highlight should disappear")
+		}
+		press(tea.KeyMsg{Type: tea.KeyEnter})
+		if m.editor == nil || m.editor.task.Name != "Second" {
+			t.Fatal("enter should open result after focus transfer")
 		}
 	}
 }

@@ -1,4 +1,4 @@
-module github.com/mchangeat/tududi-tui
+module github.com/yawks/todo-tui
 
 go 1.24.0
 

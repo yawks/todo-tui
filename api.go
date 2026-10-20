@@ -14,11 +14,13 @@ import (
 
 type client struct {
 	base, token string
+	cfg         config
+	prefix      string
 	http        *http.Client
 }
 
 func newClient(cfg config) *client {
-	return &client{base: cfg.BaseURL, token: cfg.APIKey, http: &http.Client{Timeout: 15 * time.Second}}
+	return &client{cfg: cfg, prefix: "/api/", base: cfg.BaseURL, token: cfg.APIKey, http: &http.Client{Timeout: 15 * time.Second}}
 }
 
 func (c *client) do(method, path string, body any, out any) error {
@@ -30,7 +32,7 @@ func (c *client) do(method, path string, body any, out any) error {
 		}
 		r = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.base+"/api/"+strings.TrimLeft(path, "/"), r)
+	req, err := http.NewRequest(method, c.base+c.prefix+strings.TrimLeft(path, "/"), r)
 	if err != nil {
 		return err
 	}

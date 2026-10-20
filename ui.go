@@ -73,9 +73,18 @@ const (
 	editTask editorKind = iota
 	editProject
 	editTag
+	editConfig
 )
 
+type taskSearch struct {
+	allTasks bool
+	focusAll bool
+	input    textinput.Model
+	cursor   int
+}
+
 type editor struct {
+	readOnly    bool
 	kind        editorKind
 	create      bool
 	fields      []textinput.Model
@@ -106,7 +115,7 @@ var colorPalette = []string{
 }
 
 type model struct {
-	api                *client
+	api                backend
 	tasks              []task
 	projects           []project
 	tags               []tag
@@ -125,6 +134,7 @@ type model struct {
 	loader             spinner.Model
 	err                string
 	status             string
+	search             *taskSearch
 	editor             *editor
 	confirm            bool
 	help               bool
@@ -154,7 +164,7 @@ var (
 	dim        = lipgloss.NewStyle().Foreground(muted)
 )
 
-func newModel(api *client, state appState) model {
+func newModel(api backend, state appState) model {
 	now := time.Now()
 	p := pageFromFilter(state.Filter)
 	side := sideAllFilters
@@ -233,6 +243,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tasks, m.projects, m.tags, m.err = msg.tasks, msg.projects, msg.tags, ""
 		}
 		m.clamp()
+		if m.search != nil && m.editor != nil && m.editor.readOnly {
+			for _, t := range m.tasks {
+				if t.ID == m.editor.task.ID && t.UID == m.editor.task.UID {
+					m.openTaskEditor(t)
+					m.editor.readOnly = true
+					break
+				}
+			}
+		}
 		if m.selectedProjectUID != "" && m.selectedProject() == nil {
 			m.selectedProjectUID = ""
 			return m, m.saveStateCmd()
@@ -275,7 +294,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = msg.err.Error()
 			return m, nil
 		}
-		m.editor, m.confirm, m.status = nil, false, "Saved"
+		if m.search != nil && m.editor != nil {
+			m.editor.readOnly = true
+		} else {
+			m.editor = nil
+		}
+		m.confirm, m.status = false, "Saved"
 		m.loading = true
 		return m, m.loadCmd()
 	case stateSavedMsg:
@@ -290,6 +314,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.editor != nil {
 		return m.updateEditor(key)
+	}
+	if m.search != nil {
+		return m.updateSearch(key)
 	}
 	if m.confirm {
 		return m.updateConfirm(key)
@@ -306,8 +333,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "c":
+		if !m.loading {
+			m.openConfig()
+			return m, m.editor.fields[0].Focus()
+		}
 	case "?":
 		m.help = true
+	case "/":
+		m.search = &taskSearch{input: input("", "Search tasks…")}
+		return m, m.search.input.Focus()
 	case "s":
 		m.menu, m.menuIndex = "sort", max(0, slices.Index([]string{"date", "name", "priority", "tag"}, m.sortBy))
 	case "f":
@@ -409,6 +444,107 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m model) searchResults() []task {
+	filtered := m
+	if m.page == pageCalendar || m.page == pageTags || m.page == pageDashboard {
+		filtered.page = pageFromFilter(m.lastFilter)
+	}
+	query := strings.ToLower(strings.TrimSpace(m.search.input.Value()))
+	var results []task
+	tasks := filtered.filteredTasks()
+	if m.search.allTasks {
+		tasks = m.tasks
+	}
+	for _, t := range tasks {
+		if strings.Contains(strings.ToLower(t.Name+"\n"+t.Note), query) {
+			results = append(results, t)
+		}
+	}
+	return results
+}
+
+func (m model) updateSearch(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.String() == "tab" || key.String() == "shift+tab" {
+		m.search.focusAll = !m.search.focusAll
+		if m.search.focusAll {
+			m.search.input.Blur()
+		} else {
+			return m, m.search.input.Focus()
+		}
+		return m, nil
+	}
+	if m.search.focusAll && (key.String() == " " || key.String() == "enter") {
+		m.search.allTasks = !m.search.allTasks
+		m.search.cursor = 0
+		return m, nil
+	}
+	if m.search.focusAll && (key.String() == "up" || key.String() == "down") {
+		m.search.focusAll = false
+		return m, m.search.input.Focus()
+	}
+	results := m.searchResults()
+	m.search.cursor = max(0, min(m.search.cursor, len(results)-1))
+	switch key.String() {
+	case "esc":
+		m.search = nil
+	case "up":
+		m.search.cursor = max(0, m.search.cursor-1)
+	case "down":
+		m.search.cursor = min(max(0, len(results)-1), m.search.cursor+1)
+	case "enter":
+		if len(results) > 0 {
+			m.openTaskEditor(results[m.search.cursor])
+			m.editor.readOnly = true
+			m.detailScroll = 0
+		}
+	default:
+		if m.search.focusAll {
+			return m, nil
+		}
+		before := m.search.input.Value()
+		var cmd tea.Cmd
+		m.search.input, cmd = m.search.input.Update(key)
+		if before != m.search.input.Value() {
+			m.search.cursor = 0
+		}
+		return m, cmd
+	}
+	return m, nil
+}
+
+func (m model) searchView() string {
+	width := min(64, m.width-8)
+	results := m.searchResults()
+	visible := max(1, (m.height-12)/3)
+	cursor := max(0, min(m.search.cursor, len(results)-1))
+	start := max(0, cursor-visible+1)
+	field := m.search.input
+	field.Width = width - 6
+	checkbox := "[ ] all tasks"
+	if m.search.allTasks {
+		checkbox = "[x] all tasks"
+	}
+	checkboxStyle := dim
+	if m.search.focusAll {
+		checkboxStyle = selected
+	}
+	lines := []string{titleStyle.Render("Search tasks"), field.View(), checkboxStyle.Render(checkbox), dim.Render(fmt.Sprintf("%d results", len(results))), ""}
+	for i := start; i < min(len(results), start+visible); i++ {
+		lines = append(lines, m.taskListItem(results[i], width-4, !m.search.focusAll && i == cursor), "")
+	}
+	if len(results) == 0 {
+		lines = append(lines, dim.Render(labels.Empty))
+	}
+	bodyHeight := max(1, m.height-8)
+	body := lipgloss.NewStyle().Height(bodyHeight).MaxHeight(bodyHeight).Render(strings.Join(lines, "\n"))
+	lines = []string{body}
+	lines = append(lines, dim.Render("tab focus  space toggle  ↑/↓ select  enter view  esc close"))
+	if m.err != "" {
+		lines = append(lines, m.err)
+	}
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel.Width(width-2).Height(max(1, m.height-6)).Render(strings.Join(lines, "\n")))
 }
 
 func (m *model) move(n int) {
@@ -690,7 +826,7 @@ func (m model) matchesSelectedProject(t task) bool {
 	if p == nil {
 		return true
 	}
-	return t.ProjectID == p.ID || t.ProjectUID == p.UID || t.Project != nil && t.Project.UID == p.UID
+	return t.ProjectID != 0 && t.ProjectID == p.ID || t.ProjectUID != "" && t.ProjectUID == p.UID || t.Project != nil && t.Project.UID != "" && t.Project.UID == p.UID
 }
 
 func input(value, placeholder string) textinput.Model {
@@ -727,28 +863,33 @@ func (m *model) openEdit() {
 		t := m.tags[m.cursor]
 		m.editor = &editor{kind: editTag, tag: t, fields: []textinput.Model{input(t.Name, "Name"), input(t.Color, "#RRGGBB")}}
 	} else if t, ok := m.selectedTask(); ok {
-		var due, projectName string
-		if d, ok := t.due(); ok {
-			due = d.Format("2006-01-02")
-		}
-		if t.Project != nil {
-			projectName = t.Project.Name
-		} else {
-			for _, p := range m.projects {
-				if p.ID == t.ProjectID {
-					projectName = p.Name
-				}
-			}
-		}
-		names := make([]string, len(t.Tags))
-		for i, v := range t.Tags {
-			names[i] = v.Name
-		}
-		m.editor = &editor{kind: editTask, task: t, fields: []textinput.Model{input(t.Name, "Name"), input(priorityLabel(t.Priority), "Priority"), input(statusLabel(t.Status), "Status"), input(due, "Due date"), input(projectName, "Project"), input(strings.Join(names, ", "), "Tags")}, note: note(t.Note, "Markdown description")}
+		m.openTaskEditor(t)
 	}
 	if m.editor != nil {
 		m.editor.fields[0].Focus()
 	}
+}
+
+func (m *model) openTaskEditor(t task) {
+	var due, projectName string
+	if d, ok := t.due(); ok {
+		due = d.Format("2006-01-02")
+	}
+	if t.Project != nil {
+		projectName = t.Project.Name
+	} else {
+		for _, p := range m.projects {
+			if t.ProjectID != 0 && p.ID == t.ProjectID || t.ProjectUID != "" && p.UID == t.ProjectUID {
+				projectName = p.Name
+			}
+		}
+	}
+	names := make([]string, len(t.Tags))
+	for i, v := range t.Tags {
+		names[i] = v.Name
+	}
+	m.editor = &editor{kind: editTask, task: t, fields: []textinput.Model{input(t.Name, "Name"), input(priorityLabel(t.Priority), "Priority"), input(statusLabel(t.Status), "Status"), input(due, "Due date"), input(projectName, "Project"), input(strings.Join(names, ", "), "Tags")}, note: note(t.Note, "Markdown description")}
+	m.editor.fields[0].Focus()
 }
 
 func (m model) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -774,6 +915,21 @@ func (m model) updateConfirm(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) updateEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	e := m.editor
+	if e.readOnly {
+		switch key.String() {
+		case "e":
+			e.readOnly = false
+			return m, e.fields[0].Focus()
+		case "esc":
+			m.editor = nil
+			m.detailScroll = 0
+		case "up", "pgup":
+			m.detailScroll = max(0, m.detailScroll-1)
+		case "down", "pgdown":
+			m.detailScroll++
+		}
+		return m, nil
+	}
 	if e.calendar {
 		return m.updateMiniCalendar(key)
 	}
@@ -785,7 +941,12 @@ func (m model) updateEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "esc":
-		m.editor = nil
+		if m.search != nil {
+			m.openTaskEditor(e.task)
+			m.editor.readOnly = true
+		} else {
+			m.editor = nil
+		}
 		return m, nil
 	case "ctrl+s":
 		return m.saveEditor()
@@ -823,7 +984,7 @@ func (m model) updateEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if e.kind != editTask && e.focus == 1 {
+		if (e.kind == editTag || e.kind == editProject) && e.focus == 1 {
 			e.colorIndex = 0
 			for i, color := range colorPalette {
 				if strings.EqualFold(color, e.fields[1].Value()) {
@@ -851,7 +1012,7 @@ func (m model) updateEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			e.focus--
 		}
 		max := len(e.fields)
-		if e.kind == editTag {
+		if e.kind == editTag || e.kind == editConfig {
 			max--
 		}
 		if e.focus > max {
@@ -882,12 +1043,12 @@ func (m model) updateEditor(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if e.focus == len(e.fields) {
 		if e.kind == editTask {
 			editorW := min(64, max(38, m.width/3))
-			if e.create {
+			if e.create || m.search != nil {
 				editorW = 64
 			}
 			e.note.SetWidth(max(10, editorW-6))
 			e.note.SetHeight(max(3, m.height-26))
-			if e.create {
+			if e.create || m.search != nil {
 				e.note.SetHeight(max(3, m.height-22))
 			}
 		}
@@ -1267,6 +1428,9 @@ func (m model) updateMiniCalendar(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) saveEditor() (tea.Model, tea.Cmd) {
 	e := m.editor
+	if e.kind == editConfig {
+		return m.saveConfigEditor()
+	}
 	if strings.TrimSpace(e.fields[0].Value()) == "" {
 		m.err = "Name is required"
 		return m, nil
@@ -1300,15 +1464,15 @@ func (m model) saveEditor() (tea.Model, tea.Cmd) {
 		if t.DueDate != "" && statusName(t.Status) == "not_started" {
 			t.Status = "planned"
 		}
-		t.ProjectID = 0
+		t.ProjectID, t.ProjectUID = 0, ""
 		pn := strings.TrimSpace(e.fields[4].Value())
 		for _, p := range m.projects {
 			if strings.EqualFold(p.Name, pn) {
-				t.ProjectID = p.ID
+				t.ProjectID, t.ProjectUID = p.ID, p.UID
 				break
 			}
 		}
-		if pn != "" && t.ProjectID == 0 {
+		if pn != "" && t.ProjectID == 0 && t.ProjectUID == "" {
 			m.loading = false
 			m.err = "Unknown project"
 			return m, nil
@@ -1332,6 +1496,12 @@ func (m model) View() string {
 		content := m.loader.View() + " " + titleStyle.Render("Loading…") + "\n\n" + dim.Render("Tasks · Projects · Tags")
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
 			panel.Copy().BorderForeground(blue).Width(36).Align(lipgloss.Center).Padding(1, 2).Render(content))
+	}
+	if m.search != nil {
+		if m.editor != nil {
+			return m.editorView()
+		}
+		return m.searchView()
 	}
 	if m.editor != nil && (m.editor.create || m.editor.kind != editTask || m.editor.calendar || m.editor.colorPicker) {
 		return m.editorView()
@@ -1402,9 +1572,9 @@ func (m model) footerView() string {
 	if m.showCompleted {
 		completionLabel = "active"
 	}
-	items := [][2]string{{"tab", "focus"}, {"?", "help"}, {"n", "task"}, {"N", "project"}, {"e", "edit"}, {"d", "delete"}, {"space", "complete"}, {"h", completionLabel}, {"s", "sort"}, {"f", "filter"}, {"r", "refresh"}, {"q", "quit"}}
+	items := [][2]string{{"tab", "focus"}, {"?", "help"}, {"n", "task"}, {"N", "project"}, {"e", "edit"}, {"d", "delete"}, {"space", "complete"}, {"h", completionLabel}, {"s", "sort"}, {"f", "filter"}, {"r", "refresh"}, {"c", "config"}, {"q", "quit"}, {"T", "tag"}}
 	if m.width < 120 {
-		items = [][2]string{{"tab", "focus"}, {"?", "help"}, {"n", "task"}, {"N", "project"}, {"e", "edit"}, {"d", "delete"}, {"space", "done"}, {"q", "quit"}}
+		items = [][2]string{{"tab", "focus"}, {"?", "help"}, {"n", "task"}, {"N", "project"}, {"e", "edit"}, {"d", "delete"}, {"space", "done"}, {"c", "config"}, {"q", "quit"}, {"r", "refresh"}}
 	}
 	capStyle := lipgloss.NewStyle().Background(blue).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
 	columns := make([]string, 0, len(items)/2)
@@ -1894,14 +2064,18 @@ func (m model) taskDetailView(t task, width, height int) string {
 	}
 	visible := max(1, height-1)
 	start := min(m.detailScroll, len(lines)-visible)
-	percent := (start + visible) * 100 / len(lines)
+	percent := start * 100 / (len(lines) - visible)
 	arrows := "↑↓"
 	if start == 0 {
 		arrows = " ↓"
 	} else if start+visible == len(lines) {
 		arrows = "↑ "
 	}
-	return strings.Join(lines[start:start+visible], "\n") + "\n" + lipgloss.PlaceHorizontal(width, lipgloss.Right, dim.Render(fmt.Sprintf("%s %d%%", arrows, percent)))
+	label := fmt.Sprintf("%s %3d%%", arrows, percent)
+	barWidth := max(0, width-lipgloss.Width(label)-1)
+	filled := barWidth * percent / 100
+	indicator := strings.Repeat("━", filled) + strings.Repeat("─", barWidth-filled) + " " + label
+	return dim.Render(indicator) + "\n" + strings.Join(lines[start:start+visible], "\n")
 }
 
 func (m model) taskProject(t task) *project {
@@ -2108,7 +2282,7 @@ func (m model) editorView() string {
 	if e.kind == editTask {
 		height = m.height - 4
 	}
-	if e.kind == editTag {
+	if e.kind == editTag || e.kind == editConfig {
 		height = 18
 	}
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel.Width(64).Render(m.editorContent(60, height)))
@@ -2116,15 +2290,18 @@ func (m model) editorView() string {
 
 func (m model) editorContent(width, height int) string {
 	e := m.editor
-	names := map[editorKind][]string{editTask: {"Name", "Priority", "Status", "Due date", "Project", "Tags"}, editProject: {"Name", "Color", "Status"}, editTag: {"Name", "Color"}}[e.kind]
+	if e.readOnly {
+		return titleStyle.Render("View task") + "\n\n" + lipgloss.NewStyle().Height(height-4).MaxHeight(height-4).Render(m.taskDetailView(e.task, width, height-4)) + "\n" + dim.Render("e edit  esc results")
+	}
+	names := map[editorKind][]string{editTask: {"Name", "Priority", "Status", "Due date", "Project", "Tags"}, editProject: {"Name", "Color", "Status"}, editTag: {"Name", "Color"}, editConfig: {"Backend (tududi / open-todo)", "Server URL", "API key"}}[e.kind]
 	var b strings.Builder
 	actionName := "Edit"
 	if e.create {
 		actionName = "New"
 	}
-	kinds := []string{"task", "project", "tag"}
+	kinds := []string{"task", "project", "tag", "configuration"}
 	b.WriteString(titleStyle.Render(actionName+" "+kinds[e.kind]) + "\n")
-	twoColumns := e.kind == editTask && e.create
+	twoColumns := e.kind == editTask && (e.create || m.search != nil)
 	var cells []string
 	for i, f := range e.fields {
 		f.Width = max(10, width-3)
@@ -2180,7 +2357,7 @@ func (m model) editorContent(width, height int) string {
 		}
 		b.WriteString(m.tagPreview(e.fields[5].Value()) + "\n")
 	}
-	if e.kind != editTag {
+	if e.kind != editTag && e.kind != editConfig {
 		label := "Description"
 		if e.kind == editTask {
 			label = "Markdown description"
@@ -2198,6 +2375,9 @@ func (m model) editorContent(width, height int) string {
 		b.WriteString("\n" + labelView + "\n" + noteView + "\n")
 	}
 	button := lipgloss.NewStyle().Background(lipgloss.Color("#1f6feb")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
+	if m.err != "" {
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#f85149")).Render(m.err) + "\n")
+	}
 	buttons := button.Render("Save  ctrl+s") + "  " + button.Render("Cancel  esc")
 	bodyHeight := max(1, height-1)
 	body := lipgloss.NewStyle().Height(bodyHeight).MaxHeight(bodyHeight).Render(b.String())
@@ -2337,7 +2517,7 @@ func (m model) miniCalendarView() string {
 	return b.String()
 }
 func (m model) helpView() string {
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel.Width(60).Render(titleStyle.Render("Keyboard")+"\n\n↑/↓ or j/k  move\n←/→ or tab  switch sidebar/content\ncalendar arrows  select day/task\ncalendar enter   browse day's tasks\n[/]              previous/next calendar period\nenter            open sidebar item\nn                new task\nN                new project\nT                new tag\ne/d              edit/delete\nspace            toggle task completion\nu                undo last completion (6s)\nh                active/completed tasks\nv                calendar view\nr                refresh\n?                close help\nq                quit"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel.Width(60).Render(titleStyle.Render("Keyboard")+"\n\n↑/↓ or j/k  move\n←/→ or tab  switch sidebar/content\ncalendar arrows  select day/task\ncalendar enter   browse day's tasks\n[/]              previous/next calendar period\nenter            open sidebar item\n/                search filtered tasks\nn                new task\nN                new project\nT                new tag\ne/d              edit/delete\nspace            toggle task completion\nu                undo last completion (6s)\nh                active/completed tasks\nv                calendar view\nr                refresh\nc                configuration\n?                close help\nq                quit"))
 }
 
 func sameDay(a, b time.Time) bool {
