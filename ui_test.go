@@ -877,6 +877,22 @@ func TestNewTaskRendersInPopup(t *testing.T) {
 	}
 }
 
+func TestEditTaskRendersInPopup(t *testing.T) {
+	m := model{page: pageAll, width: 160, height: 40, tasks: []task{{Name: "Existing task"}}}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
+	m = updated.(model)
+	if m.editor == nil || m.editor.create || m.editor.task.Name != "Existing task" {
+		t.Fatal("e should edit the selected task")
+	}
+	if view := m.View(); view != m.editorView() || !strings.Contains(view, "Edit task") {
+		t.Fatal("task editing should render in the centered popup")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if updated.(model).editor != nil {
+		t.Fatal("escape should close the editor")
+	}
+}
+
 func TestNewTaskPrefillsSelectedProject(t *testing.T) {
 	for _, uid := range []string{"work", "", "missing"} {
 		m := model{selectedProjectUID: uid, projects: []project{{ID: 7, UID: "work", Name: "Work"}, {ID: 8, UID: "other", Name: "Other"}}, focusSide: true, side: sideFirstProject + 1}

@@ -1503,7 +1503,7 @@ func (m model) View() string {
 		}
 		return m.searchView()
 	}
-	if m.editor != nil && (m.editor.create || m.editor.kind != editTask || m.editor.calendar || m.editor.colorPicker) {
+	if m.editor != nil {
 		return m.editorView()
 	}
 	if m.help {
@@ -1530,18 +1530,12 @@ func (m model) View() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, content)
 	if rightW > 0 {
 		right := ""
-		if m.editor != nil && m.editor.kind == editTask {
-			right = m.editorContent(rightW-4, m.height-4)
-		} else if !m.focusSide {
+		if !m.focusSide {
 			if t, ok := m.selectedTask(); ok {
 				right = m.taskDetailView(t, rightW-4, m.height-4)
 			}
 		}
 		body = lipgloss.JoinHorizontal(lipgloss.Top, body, panel.Width(rightW-2).Height(m.height-4).MaxHeight(m.height-2).Render(right))
-	} else if m.editor != nil && m.editor.kind == editTask {
-		popupW := min(64, m.width-8)
-		popup := panel.Width(popupW - 2).Render(m.editorContent(popupW-4, min(24, m.height-4)))
-		body = overlayCentered(body, popup)
 	}
 	footer := m.footerView()
 	if m.toast != "" {
