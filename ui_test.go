@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/muesli/termenv"
 )
 
 func TestSidebarListsTagsBelowProjects(t *testing.T) {
@@ -268,6 +269,19 @@ func TestTaskListItemHasTitleMetadataAndDueDate(t *testing.T) {
 	got := (model{}).taskListItem(task, 60, false)
 	if !strings.Contains(got, "Ship terminal client\n") || !strings.Contains(got, "#release") || !strings.Contains(got, "Sep 24") {
 		t.Fatalf("unexpected task item: %q", got)
+	}
+}
+
+func TestSelectedTaskMetadataKeepsHighlight(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	m := model{projects: []project{{ID: 7, Name: "Work", Color: "#00ff00"}}}
+	item := task{Name: "Task", ProjectID: 7, Tags: []tag{{Name: "urgent", Color: "#ff0000"}}, DueDate: "2099-10-26", Priority: "high"}
+	got := strings.Split(m.taskListItem(item, 60, true), "\n")[1]
+	want := selected.Width(60).Render(ansi.Strip(got))
+	if got != want {
+		t.Fatalf("selected metadata should have uninterrupted highlight:\ngot  %q\nwant %q", got, want)
 	}
 }
 
@@ -977,6 +991,9 @@ func TestTaskListShowsColoredProjectBeforeTagsForAllProjects(t *testing.T) {
 		for _, active := range []bool{true, false} {
 			line := strings.Split(m.taskListItem(task, 60, active), "\n")[1]
 			want := lipgloss.NewStyle().Foreground(lipgloss.Color(p.Color)).Render("● Work")
+			if active {
+				want = "● Work"
+			}
 			if !strings.Contains(line, want) || !strings.HasPrefix(strings.TrimSpace(ansi.Strip(line)), "● Work  #urgent") {
 				t.Fatalf("missing colored project before tags: %q", line)
 			}
@@ -1335,5 +1352,38 @@ func TestTaskSearchCheckboxAndResultsHighlightAreExclusive(t *testing.T) {
 		if m.editor == nil || m.editor.task.Name != "Second" {
 			t.Fatal("enter should open result after focus transfer")
 		}
+	}
+}
+
+func TestAllTasksDateSections(t *testing.T) {
+	now := time.Now()
+	m := model{page: pageAll, height: 40, sortBy: "name", sortDesc: true, tasks: []task{
+		{Name: "A future", DueDate: now.AddDate(0, 0, 1).Format("2006-01-02")},
+		{Name: "B today", DueDate: now.Format("2006-01-02")},
+		{Name: "C late", DueDate: now.AddDate(0, 0, -1).Format("2006-01-02")},
+		{Name: "D unplanned"},
+		{Name: "Z late", DueDate: now.AddDate(0, 0, -2).Format("2006-01-02")},
+	}}
+	view := ansi.Strip(m.contentView(60))
+	previous := -1
+	for _, text := range []string{"\n\n                            Late                            \n", "Z late", "C late", "\n\n                           Today                            \n", "B today", "\n\n                          Upcoming                          \n", "A future", "\n\n                         Unplanned                          \n", "D unplanned"} {
+		index := strings.Index(view, text)
+		if index <= previous {
+			t.Fatalf("missing or misplaced %q in %q", text, view)
+		}
+		previous = index
+	}
+	m.cursor = 2
+	if selected, ok := m.selectedTask(); !ok || selected.Name != "B today" {
+		t.Fatalf("selection does not follow grouped order: %#v", selected)
+	}
+	m.tasks = m.tasks[:1]
+	view = ansi.Strip(m.contentView(60))
+	if strings.Contains(view, "\n\n                            Late                            \n") || strings.Contains(view, "\n\n                           Today                            \n") || !strings.Contains(view, "\n\n                          Upcoming                          \n") {
+		t.Fatalf("empty sections should be omitted: %q", view)
+	}
+	m.page = pageUpcoming
+	if view = ansi.Strip(m.contentView(60)); strings.Contains(view, "\n\n                          Upcoming                          \n") {
+		t.Fatalf("section separator leaked outside All: %q", view)
 	}
 }

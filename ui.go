@@ -765,7 +765,26 @@ func (m model) filteredTasks() []task {
 	if m.sortDesc {
 		slices.Reverse(out)
 	}
+	if m.page == pageAll {
+		sort.SliceStable(out, func(i, j int) bool {
+			return taskDateGroup(out[i], start) < taskDateGroup(out[j], start)
+		})
+	}
 	return out
+}
+
+func taskDateGroup(t task, today time.Time) int {
+	due, ok := t.due()
+	if !ok {
+		return 3
+	}
+	if due.Before(today) {
+		return 0
+	}
+	if due.Before(today.AddDate(0, 0, 1)) {
+		return 1
+	}
+	return 2
 }
 
 func (m model) currentLen() int {
@@ -1709,6 +1728,9 @@ func (m model) contentView(width int) string {
 	}
 	listW := width
 	visibleCount := max(1, (m.height-9)/3)
+	if m.page == pageAll {
+		visibleCount = max(1, (m.height-14)/3)
+	}
 	start := 0
 	if m.cursor >= visibleCount {
 		start = m.cursor - visibleCount + 1
@@ -1716,10 +1738,23 @@ func (m model) contentView(width int) string {
 	end := min(len(ts), start+visibleCount)
 	visible := ts[start:end]
 	var list strings.Builder
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	for i, t := range visible {
+		if m.page == pageAll && (i == 0 || taskDateGroup(t, today) != taskDateGroup(visible[i-1], today)) {
+			group := taskDateGroup(t, today)
+			label := []string{"Late", "Today", "Upcoming", labels.Unplanned}[group]
+			background := []string{"#fca5a5", "#fde68a", "#bfdbfe", "#d1d5db"}[group]
+			style := lipgloss.NewStyle().Width(listW).Align(lipgloss.Center).Bold(true).
+				Foreground(lipgloss.Color("#111827")).Background(lipgloss.Color(background))
+			list.WriteString("\n" + style.Render(truncate(label, listW)) + "\n")
+		}
 		list.WriteString(m.taskListItem(t, listW, !m.focusSide && start+i == m.cursor))
 		if i < len(visible)-1 {
-			list.WriteString("\n" + dim.Render(strings.Repeat("─", max(1, listW))) + "\n")
+			list.WriteString("\n")
+			if m.page != pageAll || taskDateGroup(t, today) == taskDateGroup(visible[i+1], today) {
+				list.WriteString(dim.Render(strings.Repeat("─", max(1, listW))) + "\n")
+			}
 		}
 	}
 	if len(ts) > visibleCount {
@@ -1950,7 +1985,9 @@ func (m model) taskListItem(t task, width int, active bool) string {
 	if m.selectedProjectUID == "" {
 		if p := m.taskProject(t); p != nil {
 			style := dim
-			if p.Color != "" {
+			if active {
+				style = lipgloss.NewStyle()
+			} else if p.Color != "" {
 				style = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Color))
 			}
 			metadata = append(metadata, style.Render("● "+p.Name))
