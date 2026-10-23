@@ -1446,3 +1446,86 @@ func TestAllTasksSortByDateThenPriority(t *testing.T) {
 		}
 	}
 }
+
+func TestCalendarSelectionVisibleWithoutColor(t *testing.T) {
+	day := time.Date(2026, 10, 23, 12, 0, 0, 0, time.Local)
+	for _, mode := range []struct{ week, working bool }{{}, {week: true}, {week: true, working: true}} {
+		m := model{page: pageCalendar, width: 160, height: 30, calDate: day, week: mode.week, workingWeek: mode.working}
+		view := ansi.Strip(m.calendarView(130))
+		label := "▸23"
+		if mode.week {
+			label = "▸ Friday 23"
+		}
+		if !strings.Contains(view, label) {
+			t.Fatalf("mode=%+v: selected date has no visible cursor", mode)
+		}
+	}
+}
+
+func TestCalendarTaskCursorScrollsAndOpensVisibleTask(t *testing.T) {
+	day := time.Now()
+	m := model{page: pageCalendar, width: 100, height: 30, calDate: day, calendarTasks: true}
+	for i := 0; i < 12; i++ {
+		m.tasks = append(m.tasks, task{UID: fmt.Sprint(i), Name: fmt.Sprintf("task %02d", i), DueDate: day.Format(time.RFC3339)})
+	}
+	for i := 0; i < 11; i++ {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(model)
+	}
+	// Refreshing data must preserve the selected task instead of resetting to zero.
+	updated, _ := m.Update(loadedMsg{tasks: m.tasks})
+	m = updated.(model)
+	view := ansi.Strip(m.calendarView(75))
+	if m.cursor != 11 || !strings.Contains(view, "▸ task 11") {
+		t.Fatalf("selected task is not visible: cursor=%d\n%s", m.cursor, view)
+	}
+	if lipgloss.Height(m.View()) > m.height {
+		t.Fatal("task popup exceeds terminal height")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(model)
+	if view := ansi.Strip(m.calendarView(75)); !strings.Contains(view, "▸ task 10") || strings.Contains(view, "▸ task 11") {
+		t.Fatalf("visible cursor did not move up:\n%s", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if m.editor == nil || m.editor.task.UID != "10" {
+		t.Fatal("enter did not open the visibly selected task")
+	}
+}
+
+func TestCalendarCellOverflowAndPopupHighlight(t *testing.T) {
+	day := time.Date(2026, 10, 26, 12, 0, 0, 0, time.Local)
+	for _, mode := range []struct {
+		working bool
+		height  int
+	}{{false, 38}, {true, 30}} {
+		m := model{page: pageCalendar, width: 160, height: mode.height, week: true, workingWeek: mode.working, calDate: day}
+		for i := 0; i < 3; i++ {
+			m.tasks = append(m.tasks, task{Name: fmt.Sprintf("task %d", i), DueDate: day.Format(time.RFC3339)})
+		}
+		view := ansi.Strip(m.weekView(130))
+		if !strings.Contains(view, "+ 2") || !strings.Contains(view, "task 0") || strings.Contains(view, "task 1") {
+			t.Fatalf("overflow must show one complete task and count the other two:\n%s", view)
+		}
+		m.calendarTasks = true
+		view = ansi.Strip(m.weekView(130))
+		if strings.Count(view, "▸") != 2 {
+			t.Fatalf("only the day heading and popup task should have a cursor:\n%s", view)
+		}
+		if got := m.calendarSelection(130); got != dim.Render(day.Format("Monday, 02 January 2006")) {
+			t.Fatalf("top date should use the normal dim style: %q", got)
+		}
+	}
+}
+
+func TestMonthOverflowCountFitsBesideLongTaskName(t *testing.T) {
+	day := time.Date(2026, 10, 26, 12, 0, 0, 0, time.Local)
+	m := model{page: pageCalendar, width: 160, height: 30, calDate: day}
+	for i := 0; i < 3; i++ {
+		m.tasks = append(m.tasks, task{Name: strings.Repeat("long task name ", 10), DueDate: day.Format(time.RFC3339)})
+	}
+	if view := ansi.Strip(m.calendarView(130)); !strings.Contains(view, "+ 2") {
+		t.Fatalf("month cell lost its overflow count:\n%s", view)
+	}
+}

@@ -856,6 +856,9 @@ func (m model) currentLen() int {
 		return len(m.tags)
 	}
 	if m.page == pageCalendar {
+		if m.calendarTasks {
+			return len(m.tasksDueOn(m.calDate))
+		}
 		return 0
 	}
 	return len(m.filteredTasks())
@@ -2240,14 +2243,20 @@ func (m model) calendarView(width int) string {
 			day := start.AddDate(0, 0, row*7+col)
 			dayLabel := fmt.Sprintf("%2d", day.Day())
 			if sameDay(day, m.calDate) {
-				dayLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("#ffffff")).Background(blue).Bold(true).Render(dayLabel)
+				dayLabel = selected.Render("▸" + dayLabel)
 			}
 			text := dayLabel
 			tasks := m.tasksDueOn(day)
 			if len(tasks) > 0 {
-				text += " " + truncate(tasks[0].Name, cellW-4)
+				suffix := ""
 				if len(tasks) > 1 {
-					text += fmt.Sprintf(" +%d", len(tasks)-1)
+					suffix = fmt.Sprintf(" + %d", len(tasks)-1)
+				}
+				nameWidth := cellW - 3 - lipgloss.Width(dayLabel) - len(suffix)
+				if nameWidth > 0 {
+					text += " " + truncate(tasks[0].Name, nameWidth) + suffix
+				} else {
+					text += fmt.Sprintf(" + %d", len(tasks))
 				}
 			}
 			st := lipgloss.NewStyle().Width(cellW - 2).MaxWidth(cellW).Height(cellH - 2).MaxHeight(cellH).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#30363d"))
@@ -2294,10 +2303,23 @@ func (m model) weekView(width int) string {
 				continue
 			}
 			d := start.AddDate(0, 0, i)
-			lines := []string{titleStyle.Render(d.Format("Monday 02"))}
-			for j, task := range m.tasksDueOn(d) {
-				active := m.calendarTasks && sameDay(d, m.calDate) && j == m.cursor
-				lines = append(lines, m.calendarTaskLines(task, cellW-4, active)...)
+			dayLabel := titleStyle.Render(d.Format("Monday 02"))
+			if sameDay(d, m.calDate) {
+				dayLabel = selected.Render("▸ " + d.Format("Monday 02"))
+			}
+			lines := []string{dayLabel}
+			tasks := m.tasksDueOn(d)
+			available := cellH - 3 // day heading and borders
+			visible := available / 2
+			if len(tasks) > visible {
+				visible = (available - 1) / 2 // reserve the overflow count
+			}
+			visible = min(len(tasks), visible)
+			for _, task := range tasks[:visible] {
+				lines = append(lines, m.calendarTaskLines(task, cellW-4, false)...)
+			}
+			if hidden := len(tasks) - visible; hidden > 0 {
+				lines = append(lines, dim.Render(fmt.Sprintf("+ %d", hidden)))
 			}
 			st := lipgloss.NewStyle().Width(cellW - 2).MaxWidth(cellW).Height(cellH - 2).MaxHeight(cellH).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#30363d"))
 			if sameDay(d, m.calDate) {
@@ -2342,9 +2364,12 @@ func (m model) calendarTasksPopup(width int) string {
 	popupW := min(64, max(32, width*2/3))
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(m.calDate.Format("Monday, 02 January")) + "\n\n")
-	for i, task := range tasks {
-		b.WriteString(strings.Join(m.calendarTaskLines(task, popupW-4, i == m.cursor), "\n"))
-		if i < len(tasks)-1 {
+	visible := max(1, (m.height-12)/3)
+	first := max(0, m.cursor-visible+1)
+	last := min(len(tasks), first+visible)
+	for i := first; i < last; i++ {
+		b.WriteString(strings.Join(m.calendarTaskLines(tasks[i], popupW-4, i == m.cursor), "\n"))
+		if i < last-1 {
 			b.WriteString("\n\n")
 		}
 	}
@@ -2369,7 +2394,15 @@ func overlayCentered(base, popup string) string {
 }
 
 func (m model) calendarTaskLines(t task, width int, active bool) []string {
-	return strings.Split(m.taskListItem(t, width, active), "\n")
+	lines := strings.Split(m.taskListItem(t, width-2, active), "\n")
+	for i := range lines {
+		prefix := "  "
+		if active && i == 0 {
+			prefix = selected.Render("▸ ")
+		}
+		lines[i] = prefix + lines[i]
+	}
+	return lines
 }
 
 func (m model) editorView() string {
