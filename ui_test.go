@@ -480,7 +480,7 @@ func TestCalendarViewsStayInsideTerminal(t *testing.T) {
 }
 
 func TestCalendarNavigationAndTaskBrowsing(t *testing.T) {
-	day := time.Now()
+	day := time.Date(2026, 10, 21, 12, 0, 0, 0, time.Local)
 	due := day.Format(time.RFC3339)
 	m := model{page: pageCalendar, width: 160, height: 30, calDate: day, tasks: []task{
 		{Name: "first task", DueDate: due, Tags: []tag{{Name: "home", Color: "#00ff00"}}},
@@ -538,7 +538,7 @@ func TestEnterEditsCalendarTaskInPopupAndEscapeReturnsToTasks(t *testing.T) {
 }
 
 func TestOpeningCalendarFocusesDayNavigation(t *testing.T) {
-	m := model{focusSide: true, side: sideCalendar, calDate: time.Now()}
+	m := model{focusSide: true, side: sideCalendar, calDate: time.Date(2026, 10, 21, 12, 0, 0, 0, time.Local)}
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(model)
 	if m.page != pageCalendar || m.focusSide {
@@ -1527,5 +1527,88 @@ func TestMonthOverflowCountFitsBesideLongTaskName(t *testing.T) {
 	}
 	if view := ansi.Strip(m.calendarView(130)); !strings.Contains(view, "+ 2") {
 		t.Fatalf("month cell lost its overflow count:\n%s", view)
+	}
+}
+
+func TestCalendarHorizontalBoundaries(t *testing.T) {
+	monday := time.Date(2026, 10, 19, 12, 0, 0, 0, time.Local)
+	for _, mode := range []struct {
+		name          string
+		week, working bool
+		days, columns int
+	}{
+		{"month", false, false, 7, 7},
+		{"week", true, false, 7, 2},
+		{"working week", true, true, 5, 2},
+	} {
+		t.Run(mode.name, func(t *testing.T) {
+			for day := 0; day < mode.days; day++ {
+				for _, key := range []tea.KeyType{tea.KeyLeft, tea.KeyRight} {
+					date := monday.AddDate(0, 0, day)
+					m := model{page: pageCalendar, calDate: date, week: mode.week, workingWeek: mode.working}
+					wantDate, wantSidebar := date, false
+					if key == tea.KeyLeft {
+						if day%mode.columns == 0 {
+							wantSidebar = true
+						} else {
+							wantDate = date.AddDate(0, 0, -1)
+						}
+					} else if day%mode.columns != mode.columns-1 && day < mode.days-1 {
+						wantDate = date.AddDate(0, 0, 1)
+					}
+					updated, _ := m.Update(tea.KeyMsg{Type: key})
+					got := updated.(model)
+					if got.focusSide != wantSidebar || !sameDay(got.calDate, wantDate) {
+						t.Fatalf("day %d key %v: sidebar=%v date=%v, want sidebar=%v date=%v", day, key, got.focusSide, got.calDate, wantSidebar, wantDate)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestCalendarSelectionFollowsFocus(t *testing.T) {
+	for _, mode := range []struct{ week, working bool }{{false, false}, {true, false}, {true, true}} {
+		m := model{page: pageCalendar, width: 160, height: 40, week: mode.week, workingWeek: mode.working, calDate: time.Date(2026, 10, 19, 12, 0, 0, 0, time.Local)}
+		if !strings.Contains(m.calendarView(130), "▸") {
+			t.Fatal("focused calendar should highlight the selected day")
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+		m = updated.(model)
+		if !m.focusSide || strings.Contains(m.calendarView(130), "▸") {
+			t.Fatal("calendar should clear its highlight when focus returns to the sidebar")
+		}
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		m = updated.(model)
+		if m.focusSide || !strings.Contains(m.calendarView(130), "▸") || m.calDate.Day() != 19 {
+			t.Fatal("returning to calendar should restore the same selected day")
+		}
+	}
+}
+
+func TestCompletedTaskMetadataIsStruck(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	defer lipgloss.SetColorProfile(profile)
+	item := task{Name: "Finished", Status: "done", Priority: "high", DueDate: "2026-10-23", Project: &project{Name: "Work", Color: "#ff00ff"}, Tags: []tag{{Name: "urgent", Color: "#00ff00"}}}
+	for _, active := range []bool{false, true} {
+		line := strings.Split((model{}).taskListItem(item, 80, active), "\n")[1]
+		if active {
+			want := selected.Width(80).Faint(true).Strikethrough(true).Render(ansi.Strip(line))
+			if line != want {
+				t.Fatalf("selected metadata should be struck: %q", line)
+			}
+		} else {
+			for _, want := range []string{
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#ff00ff")).Strikethrough(true).Render("● Work"),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Strikethrough(true).Render("#urgent"),
+				dim.Strikethrough(true).Render("◷ Oct 23"),
+				lipgloss.NewStyle().Foreground(lipgloss.Color("#ef4444")).Bold(true).Strikethrough(true).Render("H"),
+			} {
+				if !strings.Contains(line, want) {
+					t.Fatalf("missing struck metadata %q in %q", want, line)
+				}
+			}
+		}
 	}
 }

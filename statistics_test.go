@@ -253,3 +253,108 @@ func TestStatisticsTaskLineColors(t *testing.T) {
 		t.Fatalf("metadata truncated: %q", line)
 	}
 }
+
+func TestStatisticsLeftNavigation(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		tasksFocus  bool
+		cursor      int
+		wantCursor  int
+		wantSidebar bool
+	}{
+		{"this week", false, 0, 0, true},
+		{"other period", false, 2, 1, false},
+		{"tasks", true, 2, 2, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := model{page: pageStatistics, statsTasksFocus: tc.tasksFocus, statsPeriod: 2, statsPeriodCursor: tc.cursor}
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+			m = updated.(model)
+			if m.focusSide != tc.wantSidebar || m.statsPeriodCursor != tc.wantCursor || m.statsPeriod != 2 {
+				t.Fatalf("unexpected left navigation: sidebar=%v cursor=%d period=%d", m.focusSide, m.statsPeriodCursor, m.statsPeriod)
+			}
+		})
+	}
+}
+
+func TestStatisticsPreviousPeriod(t *testing.T) {
+	m := model{page: pageStatistics, statsPeriod: 2, statsPeriodCursor: 2}
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	m = updated.(model)
+	if m.focusSide || m.statsPeriodCursor != 1 || m.statsPeriod != 2 {
+		t.Fatal("[ should select the previous period without applying it")
+	}
+}
+
+func TestStatisticsTaskGroups(t *testing.T) {
+	for _, tc := range []struct {
+		period int
+		date   string
+		want   string
+	}{
+		{0, "2026-10-23", "Fri 23 Oct 2026"},
+		{1, "2026-10-23", "Fri 23 Oct 2026"},
+		{2, "2026-01-01", "Week of 29 Dec 2025"},
+		{2, "2026-01-04", "Week of 29 Dec 2025"},
+		{2, "2026-01-05", "Week of 05 Jan 2026"},
+		{3, "2026-10-23", "Oct 2026"},
+		{4, "2026-10-23", "Oct 2026"},
+		{5, "2026-10-23", "Oct 2026"},
+		{0, "", "No due date"},
+	} {
+		if got := statisticsTaskGroup(task{DueDate: tc.date}, tc.period); got != tc.want {
+			t.Errorf("period %d date %q: got %q, want %q", tc.period, tc.date, got, tc.want)
+		}
+	}
+}
+
+func TestStatisticsGroupedTasksScrolling(t *testing.T) {
+	now := time.Now()
+	m := model{page: pageStatistics, height: 30, statsTasksFocus: true}
+	for i := 0; i < 20; i++ {
+		m.tasks = append(m.tasks, task{
+			ID: i + 1, Name: fmt.Sprintf("Grouped task %02d", i), Status: "done",
+			DueDate: now.AddDate(0, 0, -i).Format("2006-01-02"), CompletedAt: now.Format(time.RFC3339),
+		})
+	}
+	for _, period := range []int{0, 1, 2, 3, 4, 5} {
+		m.statsPeriod = period
+		rows := m.periodStatistics(now).taskRows()
+		for cursor, row := range rows {
+			m.statsCursor = cursor
+			view := ansi.Strip(m.statisticsView(90))
+			if strings.Contains(view, "TASKS\n\n") {
+				t.Fatal("unexpected blank line below TASKS")
+			}
+			if !strings.Contains(view, row.Name) || !strings.Contains(view, statisticsTaskGroup(row, period)) {
+				t.Fatalf("period %d cursor %d: selected task or heading not visible", period, cursor)
+			}
+			heading := statisticsTaskGroup(row, period)
+			centered := strings.Repeat(" ", (90-lipgloss.Width(heading))/2) + heading
+			if !strings.Contains(view, "\n"+centered) {
+				t.Fatal("date groups should use the centered category heading")
+			}
+			if lipgloss.Height(view) > m.height-4 {
+				t.Fatalf("grouped list exceeds available height: %d", lipgloss.Height(view))
+			}
+		}
+	}
+}
+
+func TestStatisticsTasksUseAvailableHeight(t *testing.T) {
+	now := time.Now()
+	m := model{page: pageStatistics, statsTasksFocus: true}
+	for i := 0; i < 100; i++ {
+		m.tasks = append(m.tasks, task{ID: i + 1, Name: fmt.Sprintf("Task %03d", i), Status: "done", DueDate: now.Format("2006-01-02"), CompletedAt: now.Format(time.RFC3339)})
+	}
+	for _, height := range []int{20, 30, 40, 50} {
+		m.height = height
+		for _, cursor := range []int{0, 50, 99} {
+			m.statsCursor = cursor
+			view := m.statisticsView(90)
+			if got := lipgloss.Height(view); got < height-5 || got > height-4 {
+				t.Fatalf("height %d cursor %d: content uses %d rows, want %d or %d", height, cursor, got, height-5, height-4)
+			}
+		}
+	}
+}

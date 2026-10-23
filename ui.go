@@ -394,14 +394,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.calendarTasks {
 				m.calendarTasks = false
 			} else {
-				m.moveCalendarDays(-1)
+				m.moveCalendarHorizontal(-1)
 			}
 		} else if !m.focusSide {
 			m.focusSide = true
 		}
 	case "right":
 		if m.page == pageCalendar && !m.focusSide && !m.calendarTasks {
-			m.moveCalendarDays(1)
+			m.moveCalendarHorizontal(1)
 		} else if m.focusSide {
 			m.focusSide = false
 		}
@@ -642,6 +642,25 @@ func (m *model) scrollTaskDetail(key string) {
 		m.detailScroll = min(last, m.detailScroll+page)
 	}
 }
+func (m *model) moveCalendarHorizontal(step int) {
+	day := (int(m.calDate.Weekday()) + 6) % 7
+	columns, days := 7, 7
+	if m.week {
+		columns = 2
+		if m.workingWeek {
+			days = 5
+		}
+	}
+	if step < 0 && day%columns == 0 {
+		m.focusSide = true
+		return
+	}
+	if step > 0 && (day%columns == columns-1 || day == days-1) {
+		return
+	}
+	m.moveCalendarDays(step)
+}
+
 func (m *model) moveCalendarDays(n int) {
 	m.calendarTasks = false
 	m.cursor = 0
@@ -1740,6 +1759,12 @@ func (m model) sideLine(i int, s string) string {
 	return lipgloss.NewStyle().Width(20).Render(s)
 }
 
+func taskGroupHeading(label, background string, width int) string {
+	style := lipgloss.NewStyle().Width(width).Align(lipgloss.Center).Bold(true).
+		Foreground(lipgloss.Color("#111827")).Background(lipgloss.Color(background))
+	return "\n" + style.Render(truncate(label, width))
+}
+
 func (m model) contentView(width int) string {
 	if m.page == pageStatistics {
 		return m.statisticsView(width)
@@ -1819,9 +1844,7 @@ func (m model) contentView(width int) string {
 			group := taskDateGroup(t, today)
 			label := []string{"Late", "Today", "Upcoming", labels.Unplanned}[group]
 			background := []string{"#fca5a5", "#fde68a", "#bfdbfe", "#d1d5db"}[group]
-			style := lipgloss.NewStyle().Width(listW).Align(lipgloss.Center).Bold(true).
-				Foreground(lipgloss.Color("#111827")).Background(lipgloss.Color(background))
-			list.WriteString("\n" + style.Render(truncate(label, listW)) + "\n")
+			list.WriteString(taskGroupHeading(label, background, listW) + "\n")
 		}
 		list.WriteString(m.taskListItem(t, listW, !m.focusSide && start+i == m.cursor))
 		if i < len(visible)-1 {
@@ -2045,12 +2068,13 @@ func weekChart(counts [7]int) string {
 }
 
 func (m model) taskListItem(t task, width int, active bool) string {
+	strike := t.completed() && m.page != pageDone
 	prefix := statusIcon(t.Status)
 	if prefix != "" {
 		prefix += " "
 	}
 	title := prefix + truncate(t.Name, width-lipgloss.Width(prefix))
-	if t.completed() && m.page != pageDone {
+	if strike {
 		if !active {
 			title = lipgloss.NewStyle().Foreground(muted).Faint(true).Strikethrough(true).Render(title)
 		}
@@ -2064,7 +2088,7 @@ func (m model) taskListItem(t task, width int, active bool) string {
 			} else if p.Color != "" {
 				style = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Color))
 			}
-			metadata = append(metadata, style.Render("● "+p.Name))
+			metadata = append(metadata, style.Strikethrough(strike && !active).Render("● "+p.Name))
 		}
 	}
 	late := ""
@@ -2077,7 +2101,7 @@ func (m model) taskListItem(t task, width int, active bool) string {
 		if tag.Color != "" {
 			style = lipgloss.NewStyle().Foreground(lipgloss.Color(tag.Color))
 		}
-		metadata = append(metadata, style.Render("#"+tag.Name))
+		metadata = append(metadata, style.Strikethrough(strike && !active).Render("#"+tag.Name))
 	}
 	if due, ok := t.due(); ok {
 		now := time.Now()
@@ -2092,7 +2116,7 @@ func (m model) taskListItem(t task, width int, active bool) string {
 		if active {
 			metadata = append(metadata, date)
 		} else {
-			metadata = append(metadata, dim.Render(date))
+			metadata = append(metadata, dim.Strikethrough(strike).Render(date))
 		}
 	}
 	second := "  " + strings.Join(metadata, "  ")
@@ -2105,14 +2129,14 @@ func (m model) taskListItem(t task, width int, active bool) string {
 	priority := map[string]string{"low": "L", "medium": "M", "high": "H"}[priorityName(t.Priority)]
 	priorityColor := map[string]string{"L": "#3b82f6", "M": "#f59e0b", "H": "#ef4444"}[priority]
 	if !active {
-		priority = lipgloss.NewStyle().Foreground(lipgloss.Color(priorityColor)).Bold(true).Render(priority)
+		priority = lipgloss.NewStyle().Foreground(lipgloss.Color(priorityColor)).Bold(true).Strikethrough(strike).Render(priority)
 	}
 	second = "  " + strings.Join(metadata, "  ")
 	second += strings.Repeat(" ", max(1, width-lipgloss.Width(second)-lipgloss.Width(priority))) + priority
 	item := title + "\n" + second
 	if active {
-		if t.completed() && m.page != pageDone {
-			return selected.Width(width).Faint(true).Strikethrough(true).Render(title) + "\n" + selected.Width(width).Faint(true).Render(second)
+		if strike {
+			return selected.Width(width).Faint(true).Strikethrough(true).Render(title) + "\n" + selected.Width(width).Faint(true).Strikethrough(true).Render(second)
 		}
 		return selected.Width(width).Render(item)
 	}
@@ -2242,7 +2266,7 @@ func (m model) calendarView(width int) string {
 		for col := 0; col < 7; col++ {
 			day := start.AddDate(0, 0, row*7+col)
 			dayLabel := fmt.Sprintf("%2d", day.Day())
-			if sameDay(day, m.calDate) {
+			if !m.focusSide && sameDay(day, m.calDate) {
 				dayLabel = selected.Render("▸" + dayLabel)
 			}
 			text := dayLabel
@@ -2263,7 +2287,7 @@ func (m model) calendarView(width int) string {
 			if day.Month() != m.calDate.Month() {
 				st = st.Foreground(muted)
 			}
-			if sameDay(day, m.calDate) {
+			if !m.focusSide && sameDay(day, m.calDate) {
 				st = st.BorderForeground(blue)
 			}
 			cells = append(cells, st.Render(text))
@@ -2304,7 +2328,7 @@ func (m model) weekView(width int) string {
 			}
 			d := start.AddDate(0, 0, i)
 			dayLabel := titleStyle.Render(d.Format("Monday 02"))
-			if sameDay(d, m.calDate) {
+			if !m.focusSide && sameDay(d, m.calDate) {
 				dayLabel = selected.Render("▸ " + d.Format("Monday 02"))
 			}
 			lines := []string{dayLabel}
@@ -2322,7 +2346,7 @@ func (m model) weekView(width int) string {
 				lines = append(lines, dim.Render(fmt.Sprintf("+ %d", hidden)))
 			}
 			st := lipgloss.NewStyle().Width(cellW - 2).MaxWidth(cellW).Height(cellH - 2).MaxHeight(cellH).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("#30363d"))
-			if sameDay(d, m.calDate) {
+			if !m.focusSide && sameDay(d, m.calDate) {
 				st = st.BorderForeground(blue)
 			}
 			cells = append(cells, st.Render(strings.Join(lines, "\n")))

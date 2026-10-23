@@ -146,6 +146,22 @@ func (s periodStatistics) taskRows() []task {
 	return rows
 }
 
+func statisticsTaskGroup(t task, period int) string {
+	d, ok := t.due()
+	if !ok {
+		return "No due date"
+	}
+	switch period {
+	case 0, 1:
+		return d.Format("Mon 02 Jan 2006")
+	case 2:
+		monday := d.AddDate(0, 0, -(int(d.Weekday())+6)%7)
+		return "Week of " + monday.Format("02 Jan 2006")
+	default:
+		return d.Format("Jan 2006")
+	}
+}
+
 func (m model) statisticsTaskLine(t task, width int, active bool) string {
 	base := lipgloss.NewStyle()
 	if active {
@@ -182,12 +198,18 @@ func (m model) statisticsTaskLine(t task, width int, active bool) string {
 func (m *model) updateStatisticsKey(key string) bool {
 	rows := m.periodStatistics(time.Now()).taskRows()
 	switch key {
-	case "left", "right":
+	case "left":
+		if m.statsTasksFocus || m.statsPeriodCursor == 0 {
+			m.focusSide = true
+		} else {
+			m.statsPeriodCursor--
+		}
+	case "[", "]", "right":
 		if m.statsTasksFocus {
 			return true
 		}
 		step := 1
-		if key == "left" {
+		if key == "[" {
 			step = -1
 		}
 		m.statsPeriodCursor = max(0, min(len(statisticsPeriods)-1, m.statsPeriodCursor+step))
@@ -274,7 +296,7 @@ func (m model) statisticsView(width int) string {
 	}
 	b.WriteString("\n" + ansi.Truncate(tabLine, width, " ›") + "\n")
 	b.WriteString(dim.Render(s.start.Format("02 Jan 2006")+" – "+s.end.AddDate(0, 0, -1).Format("02 Jan 2006")) + "\n")
-	b.WriteString(dim.Render("←/→ choose · enter apply/open · ↓ tasks · esc back") + "\n")
+	b.WriteString(dim.Render("←/→ choose · ← first: sidebar · enter apply/open · ↓ tasks · esc back") + "\n")
 	cards := []struct {
 		name  string
 		count int
@@ -357,17 +379,53 @@ func (m model) statisticsView(width int) string {
 		summary[i] = ansi.Truncate(line, width, "…")
 	}
 	rows := s.taskRows()
-	visible := max(1, m.height-6-len(summary)-2)
+	visible := max(2, m.height-4-len(summary)-2)
 	cursor := min(m.statsCursor, max(0, len(rows)-1))
-	start := max(0, cursor-visible+1)
-	end := min(len(rows), start+visible)
+	start := cursor
+	used := 2 // Reserve the heading and the selected task.
+	for start > 0 {
+		cost := 2
+		if statisticsTaskGroup(rows[start-1], m.statsPeriod) != statisticsTaskGroup(rows[start], m.statsPeriod) {
+			cost++
+		}
+		if used+cost > visible {
+			break
+		}
+		used += cost
+		start--
+	}
 	lines := []string{strings.Join(summary, "\n"), titleStyle.Render("TASKS")}
 	if len(rows) == 0 {
 		lines = append(lines, dim.Render("Nothing here"))
 	}
-	for i := start; i < end; i++ {
-		line := m.statisticsTaskLine(rows[i], width, m.statsTasksFocus && !m.focusSide && i == cursor)
-		lines = append(lines, line)
+	end, used := start, 0
+	previousGroup := ""
+	for end < len(rows) {
+		group := statisticsTaskGroup(rows[end], m.statsPeriod)
+		cost := 2
+		if group != previousGroup && end > start {
+			cost++
+		}
+		if used+cost > visible {
+			break
+		}
+		if group != previousGroup {
+			background := "#bfdbfe"
+			if group == "No due date" {
+				background = "#d1d5db"
+			}
+			heading := taskGroupHeading(group, background, width)
+			if end == start {
+				heading = strings.TrimPrefix(heading, "\n")
+			}
+			lines = append(lines, heading)
+		} else {
+			lines = append(lines, dim.Render(strings.Repeat("─", max(1, width))))
+		}
+		lines = append(lines, m.statisticsTaskLine(rows[end], width, m.statsTasksFocus && !m.focusSide && end == cursor))
+		previousGroup = group
+		used += cost
+		end++
 	}
 	lines = append(lines, dim.Render(fmt.Sprintf("%d–%d / %d · ↑/↓ tasks · enter view · ↑ first task: periods", min(start+1, len(rows)), end, len(rows))))
 	return strings.Join(lines, "\n")
