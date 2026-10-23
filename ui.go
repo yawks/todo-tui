@@ -2091,7 +2091,7 @@ func (m model) taskListItem(t task, width int, active bool) string {
 			metadata = append(metadata, style.Strikethrough(strike && !active).Render("● "+p.Name))
 		}
 	}
-	late := ""
+	late, date := "", ""
 	for _, tag := range t.Tags {
 		if active {
 			metadata = append(metadata, "#"+tag.Name)
@@ -2112,16 +2112,10 @@ func (m model) taskListItem(t task, width int, active bool) string {
 				late = lipgloss.NewStyle().Foreground(lipgloss.Color("#dc2626")).Bold(true).Render(late)
 			}
 		}
-		date := "◷ " + due.Format("Jan 02")
-		if active {
-			metadata = append(metadata, date)
-		} else {
-			metadata = append(metadata, dim.Strikethrough(strike).Render(date))
+		date = "◷ " + due.Format("Jan 02")
+		if !active {
+			date = dim.Strikethrough(strike).Render(date)
 		}
-	}
-	second := "  " + strings.Join(metadata, "  ")
-	if len(metadata) == 0 {
-		second = " "
 	}
 	if late != "" {
 		metadata = append(metadata, late)
@@ -2131,8 +2125,12 @@ func (m model) taskListItem(t task, width int, active bool) string {
 	if !active {
 		priority = lipgloss.NewStyle().Foreground(lipgloss.Color(priorityColor)).Bold(true).Strikethrough(strike).Render(priority)
 	}
-	second = "  " + strings.Join(metadata, "  ")
-	second += strings.Repeat(" ", max(1, width-lipgloss.Width(second)-lipgloss.Width(priority))) + priority
+	right := priority
+	if date != "" {
+		right = date + "  " + priority
+	}
+	second := ansi.Truncate("  "+strings.Join(metadata, "  "), max(0, width-lipgloss.Width(right)-1), "…")
+	second += strings.Repeat(" ", max(1, width-lipgloss.Width(second)-lipgloss.Width(right))) + right
 	item := title + "\n" + second
 	if active {
 		if strike {

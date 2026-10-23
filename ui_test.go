@@ -1612,3 +1612,15 @@ func TestCompletedTaskMetadataIsStruck(t *testing.T) {
 		}
 	}
 }
+
+func TestTaskListDateRightBeforePriority(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		for _, name := range []string{"Work", strings.Repeat("Long project", 10)} {
+			item := task{Name: "Task", DueDate: "2030-10-23", Priority: "high", Project: &project{Name: name}, Tags: []tag{{Name: "urgent"}}}
+			line := ansi.Strip(strings.Split((model{}).taskListItem(item, 60, active), "\n")[1])
+			if !strings.HasSuffix(line, "◷ Oct 23  H") || lipgloss.Width(line) != 60 {
+				t.Fatalf("date and priority should align at the right edge: %q", line)
+			}
+		}
+	}
+}
