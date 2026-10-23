@@ -1041,6 +1041,9 @@ func TestCompletionToastAndUndo(t *testing.T) {
 	if m.undoTask != nil {
 		t.Fatal("toast must wait for API success")
 	}
+	if m.loading || !m.togglePending || !m.tasks[0].completed() || len(m.filteredTasks()) != 0 || strings.Contains(m.View(), "Loading…") {
+		t.Fatal("completion must update immediately without a loader")
+	}
 	updated, _ = m.Update(cmd())
 	m = updated.(model)
 	if m.undoTask == nil || m.toast != "Well done 🎉" {
@@ -1067,6 +1070,45 @@ func TestCompletionToastAndUndo(t *testing.T) {
 	updated, _ = m.Update(celebrationTickMsg{generation})
 	if updated.(model).toastFrame != 0 {
 		t.Fatal("stale timer changed newer toast")
+	}
+}
+
+func TestOptimisticToggleRollback(t *testing.T) {
+	for _, status := range []string{"waiting", "done"} {
+		t.Run(status, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "offline", http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			original := task{UID: "task-1", Name: "Test", Status: status, CompletedAt: "2026-10-20T10:00:00Z"}
+			m := model{api: newClient(config{BaseURL: server.URL}), page: pageAll, showCompleted: original.completed(), tasks: []task{original}}
+			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+			m = updated.(model)
+			if m.loading || m.tasks[0].completed() == original.completed() {
+				t.Fatal("status must change before the API responds")
+			}
+			if _, duplicate := m.Update(tea.KeyMsg{Type: tea.KeySpace}); duplicate != nil {
+				t.Fatal("must not send another toggle while one is pending")
+			}
+			updated, next := m.Update(cmd())
+			m = updated.(model)
+			if m.tasks[0].Status != original.Status || m.tasks[0].CompletedAt != original.CompletedAt || m.togglePending || m.err == "" || next != nil {
+				t.Fatal("failure must restore the previous task and show an error")
+			}
+			if original.completed() {
+				m.undoTask = &task{UID: original.UID, Status: "waiting"}
+				updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+				m = updated.(model)
+				if m.loading || m.tasks[0].completed() {
+					t.Fatal("undo must update immediately without a loader")
+				}
+				updated, _ = m.Update(cmd())
+				m = updated.(model)
+				if !m.tasks[0].completed() || m.tasks[0].CompletedAt != original.CompletedAt || m.togglePending || m.err == "" {
+					t.Fatal("failed undo must restore the completed task")
+				}
+			}
+		})
 	}
 }
 

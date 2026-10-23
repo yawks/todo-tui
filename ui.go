@@ -56,9 +56,10 @@ type loadedMsg struct {
 }
 type actionMsg struct{ err error }
 type taskToggleMsg struct {
-	task task
-	undo bool
-	err  error
+	task     task
+	previous *task
+	undo     bool
+	err      error
 }
 type celebrationTickMsg struct{ generation int }
 
@@ -130,6 +131,7 @@ type model struct {
 	calendarTasks      bool
 	calDate            time.Time
 	width, height      int
+	togglePending      bool
 	loading            bool
 	loader             spinner.Model
 	err                string
@@ -268,7 +270,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, celebrationTick(m.toastGeneration)
 	case taskToggleMsg:
+		m.togglePending = false
 		if msg.err != nil {
+			previous := msg.task
+			if msg.previous != nil {
+				previous = *msg.previous
+			}
+			m.replaceTask(previous)
 			m.loading = false
 			m.err = msg.err.Error()
 			return m, nil
@@ -287,7 +295,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.undoTask = nil
 			m.toast = "Task reopened"
 		}
-		return m, tea.Batch(m.loadCmd(), celebrationTick(m.toastGeneration))
+		return m, celebrationTick(m.toastGeneration)
 	case actionMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -430,20 +438,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirm = true
 		}
 	case "u":
-		if m.undoTask != nil && !m.loading {
+		if m.undoTask != nil && !m.loading && !m.togglePending {
 			t := *m.undoTask
-			m.loading = true
+			var previous *task
+			for _, current := range m.tasks {
+				if current.ID == t.ID && current.UID == t.UID {
+					previous = &current
+					break
+				}
+			}
+			m.replaceTask(t)
+			m.togglePending = true
 			return m, func() tea.Msg {
-				return taskToggleMsg{task: t, undo: true, err: m.api.setTaskStatus(t, statusName(t.Status))}
+				return taskToggleMsg{task: t, previous: previous, undo: true, err: m.api.setTaskStatus(t, statusName(t.Status))}
 			}
 		}
 	case " ":
-		if t, ok := m.selectedTask(); ok && !m.loading {
-			m.loading = true
+		if t, ok := m.selectedTask(); ok && !m.loading && !m.togglePending {
+			updated := t
+			updated.Status, updated.CompletedAt = "not_started", ""
+			if !t.completed() {
+				updated.Status, updated.CompletedAt = "done", time.Now().Format(time.RFC3339)
+			}
+			m.replaceTask(updated)
+			m.togglePending = true
 			return m, func() tea.Msg { return taskToggleMsg{task: t, err: m.api.toggleTask(t)} }
 		}
 	}
 	return m, nil
+}
+
+func (m *model) replaceTask(updated task) {
+	for i, t := range m.tasks {
+		if t.ID == updated.ID && t.UID == updated.UID {
+			m.tasks[i] = updated
+			break
+		}
+	}
+	m.clamp()
 }
 
 func (m model) searchResults() []task {
