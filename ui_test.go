@@ -1429,3 +1429,20 @@ func TestAllTasksDateSections(t *testing.T) {
 		t.Fatalf("section separator leaked outside All: %q", view)
 	}
 }
+
+func TestAllTasksSortByDateThenPriority(t *testing.T) {
+	m := model{page: pageAll, sortBy: "name", sortDesc: true, tasks: []task{
+		{Name: "later high", DueDate: "2030-05-02", Priority: "high"},
+		{Name: "early low", DueDate: "2030-05-01", Priority: "low"},
+		{Name: "unplanned low", Priority: "low"},
+		{Name: "early high", DueDate: "2030-05-01", Priority: "high"},
+		{Name: "early medium", DueDate: "2030-05-01", Priority: "medium"},
+		{Name: "unplanned high", Priority: "high"},
+	}}
+	want := []string{"early high", "early medium", "early low", "later high", "unplanned high", "unplanned low"}
+	for i, task := range m.filteredTasks() {
+		if task.Name != want[i] {
+			t.Fatalf("task %d = %q, want %q", i, task.Name, want[i])
+		}
+	}
+}

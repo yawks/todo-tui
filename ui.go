@@ -29,6 +29,7 @@ const (
 	pageTags
 	pageAll
 	pageDashboard
+	pageStatistics
 )
 
 const (
@@ -40,6 +41,7 @@ const (
 	sideDone
 	sideCalendar
 	sideTags
+	sideStatistics
 	sideAllProjects
 	sideFirstProject
 )
@@ -154,6 +156,10 @@ type model struct {
 	undoTask           *task
 	toast              string
 	toastFrame         int
+	statsPeriod        int
+	statsCursor        int
+	statsPeriodCursor  int
+	statsTasksFocus    bool
 	toastGeneration    int
 }
 
@@ -172,6 +178,8 @@ func newModel(api backend, state appState) model {
 	side := sideAllFilters
 	if p <= pageDone {
 		side = int(p) + sideToday
+	} else if p == pageStatistics {
+		side = sideStatistics
 	} else if p == pageDashboard {
 		side = sideDashboard
 	}
@@ -190,6 +198,8 @@ func pageFromFilter(filter string) page {
 		return pageDone
 	case "all":
 		return pageAll
+	case "statistics":
+		return pageStatistics
 	case "dashboard":
 		return pageDashboard
 	default:
@@ -337,6 +347,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.menu != "" {
 		return m.updateMenu(key)
+	}
+	if m.page == pageStatistics && !m.focusSide {
+		if m.updateStatisticsKey(key.String()) {
+			return m, nil
+		}
 	}
 	switch key.String() {
 	case "q", "ctrl+c":
@@ -668,6 +683,13 @@ func (m *model) clamp() {
 func (m model) sideCount() int { return sideFirstProject + len(m.projects) + 1 + len(m.tags) }
 func (m *model) chooseSide() tea.Cmd {
 	m.cursor = 0
+	if m.side == sideStatistics {
+		m.page, m.lastFilter, m.focusSide = pageStatistics, "statistics", false
+		m.statsCursor = 0
+		m.statsPeriodCursor = m.statsPeriod
+		m.statsTasksFocus = false
+		return m.saveStateCmd()
+	}
 	if m.side == sideDashboard {
 		m.page = pageDashboard
 		m.lastFilter = "dashboard"
@@ -763,6 +785,18 @@ func (m model) filteredTasks() []task {
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
+		if m.page == pageAll {
+			a, aDue := out[i].due()
+			b, bDue := out[j].due()
+			if aDue != bDue {
+				return aDue
+			}
+			if aDue && !a.Equal(b) {
+				return a.Before(b)
+			}
+			order := map[string]int{"low": 0, "medium": 1, "high": 2}
+			return order[priorityName(out[i].Priority)] > order[priorityName(out[j].Priority)]
+		}
 		less := false
 		switch m.sortBy {
 		case "name":
@@ -794,13 +828,8 @@ func (m model) filteredTasks() []task {
 		}
 		return less
 	})
-	if m.sortDesc {
+	if m.sortDesc && m.page != pageAll {
 		slices.Reverse(out)
-	}
-	if m.page == pageAll {
-		sort.SliceStable(out, func(i, j int) bool {
-			return taskDateGroup(out[i], start) < taskDateGroup(out[j], start)
-		})
 	}
 	return out
 }
@@ -820,7 +849,7 @@ func taskDateGroup(t task, today time.Time) int {
 }
 
 func (m model) currentLen() int {
-	if m.page == pageDashboard {
+	if m.page == pageDashboard || m.page == pageStatistics {
 		return 0
 	}
 	if m.page == pageTags {
@@ -840,7 +869,7 @@ func (m model) selectedTask() (task, bool) {
 		return task{}, false
 	}
 	ts := m.filteredTasks()
-	if m.page == pageDashboard || m.page == pageTags || m.page == pageCalendar || m.cursor >= len(ts) {
+	if m.page == pageStatistics || m.page == pageDashboard || m.page == pageTags || m.page == pageCalendar || m.cursor >= len(ts) {
 		return task{}, false
 	}
 	return ts[m.cursor], true
@@ -1572,7 +1601,7 @@ func (m model) View() string {
 	}
 	mainW := m.width - sideW - 1
 	rightW := 0
-	if m.page != pageDashboard && m.page != pageCalendar && m.page != pageTags {
+	if m.page != pageStatistics && m.page != pageDashboard && m.page != pageCalendar && m.page != pageTags {
 		rightW = min(64, max(38, m.width/3))
 		mainW -= rightW
 	}
@@ -1621,6 +1650,9 @@ func (m model) footerView() string {
 	if m.width < 120 {
 		items = [][2]string{{"tab", "focus"}, {"?", "help"}, {"n", "task"}, {"N", "project"}, {"e", "edit"}, {"d", "delete"}, {"space", "done"}, {"c", "config"}, {"q", "quit"}, {"r", "refresh"}}
 	}
+	if m.page == pageStatistics {
+		items = [][2]string{{"tab", "focus"}, {"?", "help"}, {"←/→", "period"}, {"enter", "select/open"}, {"↑/↓", "tasks"}, {"r", "refresh"}, {"c", "config"}, {"q", "quit"}}
+	}
 	capStyle := lipgloss.NewStyle().Background(blue).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
 	columns := make([]string, 0, len(items)/2)
 	columnWidth := max(1, (m.width-(len(items)/2-1)*3)/(len(items)/2))
@@ -1642,10 +1674,12 @@ func (m model) footerView() string {
 }
 
 func (m model) sidebarView() string {
-	items := []string{"▤  " + labels.Dashboard, "All", "◷  " + labels.Today, "→  " + labels.Upcoming, "○  " + labels.Unplanned, "✓  " + labels.Done, "▦  " + labels.Calendar, "#  " + labels.Tags}
+	items := []string{"▤  " + labels.Dashboard, "All", "◷  " + labels.Today, "→  " + labels.Upcoming, "○  " + labels.Unplanned, "✓  " + labels.Done, "▦  " + labels.Calendar, "#  " + labels.Tags, "▥  Statistics"}
 	var b strings.Builder
 	for i, v := range items {
-		if i == sideDashboard && m.page == pageDashboard {
+		if i == sideStatistics && m.page == pageStatistics {
+			v = "> " + v
+		} else if i == sideDashboard && m.page == pageDashboard {
 			v = "> " + v
 		} else if i >= sideAllFilters && i <= sideDone {
 			active := i == sideAllFilters && m.page == pageAll || i >= sideToday && m.page == page(i-sideToday)
@@ -1704,6 +1738,9 @@ func (m model) sideLine(i int, s string) string {
 }
 
 func (m model) contentView(width int) string {
+	if m.page == pageStatistics {
+		return m.statisticsView(width)
+	}
 	if m.page == pageDashboard {
 		return m.dashboardView(width)
 	}
@@ -1731,7 +1768,9 @@ func (m model) contentView(width int) string {
 	if m.showCompleted && m.page != pageDone {
 		b.WriteString(dim.Render("  · completed only"))
 	}
-	if m.sortBy != "" {
+	if m.page == pageAll {
+		b.WriteString(dim.Render("  · sort: date, highest priority first"))
+	} else if m.sortBy != "" {
 		direction := "↑"
 		if m.sortDesc {
 			direction = "↓"
@@ -2354,7 +2393,11 @@ func (m model) editorView() string {
 func (m model) editorContent(width, height int) string {
 	e := m.editor
 	if e.readOnly {
-		return titleStyle.Render("View task") + "\n\n" + lipgloss.NewStyle().Height(height-4).MaxHeight(height-4).Render(m.taskDetailView(e.task, width, height-4)) + "\n" + dim.Render("e edit  esc results")
+		hint := "e edit  esc results"
+		if m.page == pageStatistics && m.search == nil {
+			hint = "↑/↓ scroll  e edit  esc statistics"
+		}
+		return titleStyle.Render("View task") + "\n\n" + lipgloss.NewStyle().Height(height-4).MaxHeight(height-4).Render(m.taskDetailView(e.task, width, height-4)) + "\n" + dim.Render(hint)
 	}
 	names := map[editorKind][]string{editTask: {"Name", "Priority", "Status", "Due date", "Project", "Tags"}, editProject: {"Name", "Color", "Status"}, editTag: {"Name", "Color"}, editConfig: {"Backend (tududi / open-todo)", "Server URL", "API key"}}[e.kind]
 	var b strings.Builder
@@ -2580,7 +2623,7 @@ func (m model) miniCalendarView() string {
 	return b.String()
 }
 func (m model) helpView() string {
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel.Width(60).Render(titleStyle.Render("Keyboard")+"\n\n↑/↓ or j/k  move\n←/→ or tab  switch sidebar/content\ncalendar arrows  select day/task\ncalendar enter   browse day's tasks\n[/]              previous/next calendar period\nenter            open sidebar item\n/                search filtered tasks\nn                new task\nN                new project\nT                new tag\ne/d              edit/delete\nspace            toggle task completion\nu                undo last completion (6s)\nh                active/completed tasks\nv                calendar view\nr                refresh\nc                configuration\n?                close help\nq                quit"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel.Width(60).Render(titleStyle.Render("Keyboard")+"\n\n↑/↓ or j/k  move\n←/→ or tab  switch sidebar/content\ncalendar arrows  select day/task\ncalendar enter   browse day's tasks\nstats ←/→        choose period, enter apply\nstats ↓ / ↑      browse tasks / return to periods\n[/]              previous/next calendar period\nenter            open sidebar item\n/                search filtered tasks\nn                new task\nN                new project\nT                new tag\ne/d              edit/delete\nspace            toggle task completion\nu                undo last completion (6s)\nh                active/completed tasks\nv                calendar view\nr                refresh\nc                configuration\n?                close help\nq                quit"))
 }
 
 func sameDay(a, b time.Time) bool {
