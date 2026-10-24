@@ -442,6 +442,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openNew()
 	case "N":
 		m.editor = &editor{kind: editProject, create: true, fields: []textinput.Model{input("", "Name"), input("#3b82f6", "#RRGGBB"), input("not_started", "Status")}, note: note("", "Description")}
+		m.addProjectParentField()
 		m.editor.fields[0].Focus()
 	case "T":
 		m.editor = &editor{kind: editTag, create: true, fields: []textinput.Model{input("", "Name"), input("#3b82f6", "#RRGGBB")}}
@@ -928,7 +929,29 @@ func (m model) matchesSelectedProject(t task) bool {
 	if p == nil {
 		return true
 	}
-	return t.ProjectID != 0 && t.ProjectID == p.ID || t.ProjectUID != "" && t.ProjectUID == p.UID || t.Project != nil && t.Project.UID != "" && t.Project.UID == p.UID
+	if t.ProjectID != 0 && t.ProjectID == p.ID || t.ProjectUID != "" && t.ProjectUID == p.UID || t.Project != nil && t.Project.UID != "" && t.Project.UID == p.UID {
+		return true
+	}
+	if !projectHierarchySupported(m.api) {
+		return false
+	}
+	current := m.taskProject(t)
+	seen := map[string]bool{}
+	for current != nil && current.ParentUID != "" && !seen[current.ParentUID] {
+		uid := current.ParentUID
+		if uid == p.UID {
+			return true
+		}
+		seen[uid] = true
+		current = nil
+		for i := range m.projects {
+			if m.projects[i].UID == uid {
+				current = &m.projects[i]
+				break
+			}
+		}
+	}
+	return false
 }
 
 func input(value, placeholder string) textinput.Model {
@@ -961,6 +984,7 @@ func (m *model) openNew() {
 func (m *model) openEdit() {
 	if p, ok := m.focusedProject(); ok {
 		m.editor = &editor{kind: editProject, project: p, fields: []textinput.Model{input(p.Name, "Name"), input(p.Color, "#RRGGBB"), input(p.Status, "Status")}, note: note(p.Description, "Description")}
+		m.addProjectParentField()
 	} else if m.page == pageTags && m.cursor < len(m.tags) {
 		t := m.tags[m.cursor]
 		m.editor = &editor{kind: editTag, tag: t, fields: []textinput.Model{input(t.Name, "Name"), input(t.Color, "#RRGGBB")}}
@@ -1550,6 +1574,25 @@ func (m model) saveEditor() (tea.Model, tea.Cmd) {
 		if p.Status == "" {
 			p.Status = "not_started"
 		}
+		if len(e.fields) > 3 {
+			value := strings.TrimSpace(e.fields[3].Value())
+			p.ParentUID = ""
+			matches := 0
+			for _, candidate := range m.projects {
+				if value != "" && (candidate.UID == value || strings.EqualFold(candidate.Name, value)) {
+					p.ParentUID = candidate.UID
+					matches++
+				}
+			}
+			if value != "" && matches != 1 {
+				m.loading, m.err = false, "Choose a unique parent project name or UID"
+				return m, nil
+			}
+			if projectDescendsFrom(m.projects, p.ParentUID, p.UID) {
+				m.loading, m.err = false, "A project cannot be its own parent or a descendant's child"
+				return m, nil
+			}
+		}
 		return m, action(func() error { return m.api.saveProject(p, e.create) })
 	default:
 		t := e.task
@@ -1725,7 +1768,7 @@ func (m model) sidebarView() string {
 		if p.UID == m.selectedProjectUID {
 			prefix = "> "
 		}
-		name := prefix + "● " + p.Name
+		name := prefix + strings.Repeat("  ", p.Depth) + "● " + p.Name
 		if p.Color != "" && !(m.focusSide && m.side == i+sideFirstProject) {
 			name = lipgloss.NewStyle().Foreground(lipgloss.Color(p.Color)).Render(name)
 		}
@@ -2080,7 +2123,16 @@ func (m model) taskListItem(t task, width int, active bool) string {
 		}
 	}
 	var metadata []string
-	if m.selectedProjectUID == "" {
+	showProject := m.selectedProjectUID == ""
+	if !showProject && projectHierarchySupported(m.api) {
+		for _, p := range m.projects {
+			if p.ParentUID == m.selectedProjectUID {
+				showProject = true
+				break
+			}
+		}
+	}
+	if showProject {
 		if p := m.taskProject(t); p != nil {
 			style := dim
 			if active {
@@ -2455,6 +2507,9 @@ func (m model) editorContent(width, height int) string {
 		return titleStyle.Render("View task") + "\n\n" + lipgloss.NewStyle().Height(height-4).MaxHeight(height-4).Render(m.taskDetailView(e.task, width, height-4)) + "\n" + dim.Render(hint)
 	}
 	names := map[editorKind][]string{editTask: {"Name", "Priority", "Status", "Due date", "Project", "Tags"}, editProject: {"Name", "Color", "Status"}, editTag: {"Name", "Color"}, editConfig: {"Backend (tududi / open-todo)", "Server URL", "API key"}}[e.kind]
+	if e.kind == editProject && len(e.fields) > 3 {
+		names = append(names, "Parent project (empty = top level)")
+	}
 	var b strings.Builder
 	actionName := "Edit"
 	if e.create {

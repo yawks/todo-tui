@@ -17,7 +17,7 @@ func TestOpenTodoLoadAndSave(t *testing.T) {
 		case "GET /api/v1/tasks":
 			_, _ = w.Write([]byte(`{"tasks":[{"id":"task-id","title":"Example","description":"note","project_id":"project-id","priority":3,"due":{"date":"2026-10-20","time":"14:30","tz":"Europe/Paris"},"labels":["label-id"],"created_at":1792454400000,"completed_at":null}]}`))
 		case "GET /api/v1/projects":
-			_, _ = w.Write([]byte(`{"projects":[{"id":"project-id","name":"Work","color":"#ff0000"},{"id":"other","name":"Other"}]}`))
+			_, _ = w.Write([]byte(`{"projects":[{"id":"project-id","name":"Work","parent_id":"other","color":"#ff0000"},{"id":"other","name":"Other"}]}`))
 		case "GET /api/v1/labels":
 			_, _ = w.Write([]byte(`{"labels":[{"id":"label-id","name":"Urgent","color":"#ff0000"}]}`))
 		case "PATCH /api/v1/tasks/task-id":
@@ -39,6 +39,9 @@ func TestOpenTodoLoadAndSave(t *testing.T) {
 	if len(tasks) != 1 || len(projects) != 2 || len(tags) != 1 {
 		t.Fatal("missing data")
 	}
+	if projects[0].UID != "other" || projects[1].ParentUID != "other" || projects[1].Depth != 1 {
+		t.Fatalf("hierarchy = %+v", projects)
+	}
 	task := tasks[0]
 	if task.UID != "task-id" || task.ProjectUID != "project-id" || task.Tags[0].Name != "Urgent" || statusName(task.Status) != "planned" {
 		t.Fatalf("task = %+v", task)
@@ -49,8 +52,8 @@ func TestOpenTodoLoadAndSave(t *testing.T) {
 		t.Fatal("project missing")
 	}
 	m.selectedProjectUID = "other"
-	if m.matchesSelectedProject(task) {
-		t.Fatal("incorrect project association")
+	if !m.matchesSelectedProject(task) {
+		t.Fatal("parent project does not include child tasks")
 	}
 	if err := c.saveTask(task, false); err != nil {
 		t.Fatal(err)
@@ -95,7 +98,7 @@ func TestOpenTodoWrites(t *testing.T) {
 		name, method, path string
 		run                func() error
 	}{
-		{"create project", "POST", "/api/v1/projects", func() error { return c.saveProject(project{Name: "Work"}, true) }},
+		{"create project", "POST", "/api/v1/projects", func() error { return c.saveProject(project{Name: "Work", ParentUID: "parent"}, true) }},
 		{"archive project", "PATCH", "/api/v1/projects/p", func() error { return c.saveProject(project{UID: "p", Name: "Work", Status: "done"}, false) }},
 		{"create label", "POST", "/api/v1/labels", func() error { return c.saveTag(tag{Name: "Urgent", Color: "#ff0000"}, true) }},
 		{"edit label", "PATCH", "/api/v1/labels/l", func() error { return c.saveTag(tag{UID: "l", Name: "New"}, false) }},
@@ -111,6 +114,12 @@ func TestOpenTodoWrites(t *testing.T) {
 			}
 			if method != tt.method || path != tt.path {
 				t.Fatalf("got %s %s", method, path)
+			}
+			if tt.name == "create project" && body["parent_id"] != "parent" {
+				t.Fatal("parent missing")
+			}
+			if tt.name == "archive project" && body["parent_id"] != nil {
+				t.Fatal("parent not cleared")
 			}
 			if tt.name == "archive project" && body["archived"] != true {
 				t.Fatal("archive missing")

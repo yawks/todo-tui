@@ -24,3 +24,11 @@ func newBackend(cfg config) backend {
 	}
 	return c
 }
+
+func (c *client) supportsProjectHierarchy() bool         { return false }
+func (c *openTodoClient) supportsProjectHierarchy() bool { return true }
+
+func projectHierarchySupported(api backend) bool {
+	c, ok := api.(interface{ supportsProjectHierarchy() bool })
+	return ok && c.supportsProjectHierarchy()
+}

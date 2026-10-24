@@ -121,6 +121,8 @@ func (t task) completedDate() (time.Time, bool) {
 }
 
 type project struct {
+	ParentUID   string `json:"-"`
+	Depth       int    `json:"-"`
 	ID          int    `json:"id"`
 	UID         string `json:"uid"`
 	Name        string `json:"name"`

@@ -28,6 +28,7 @@ type openTodoTask struct {
 }
 
 type openTodoProject struct {
+	ParentID    string `json:"parent_id"`
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
@@ -73,7 +74,7 @@ func (c *openTodoClient) load() ([]task, []project, []tag, error) {
 		if p.Archived {
 			status = "done"
 		}
-		projects = append(projects, project{UID: p.ID, Name: p.Name, Description: p.Description, Color: p.Color, Status: status})
+		projects = append(projects, project{ParentUID: p.ParentID, UID: p.ID, Name: p.Name, Description: p.Description, Color: p.Color, Status: status})
 	}
 	for _, v := range ts.Tasks {
 		priority := "low"
@@ -98,7 +99,7 @@ func (c *openTodoClient) load() ([]task, []project, []tag, error) {
 		}
 		tasks = append(tasks, t)
 	}
-	return tasks, projects, tags, nil
+	return tasks, orderedProjects(projects), tags, nil
 }
 
 func openTodoCompletion(t task, status string) (any, error) {
@@ -195,7 +196,11 @@ func (c *openTodoClient) saveProject(p project, create bool) error {
 	if p.Status != "" && p.Status != "not_started" && p.Status != "done" {
 		return fmt.Errorf("OpenTodo project status must be not_started (active) or done (archived)")
 	}
-	return c.save("projects", p.UID, create, map[string]any{"name": p.Name, "description": p.Description, "color": p.Color, "archived": p.Status == "done"})
+	var parent any
+	if p.ParentUID != "" {
+		parent = p.ParentUID
+	}
+	return c.save("projects", p.UID, create, map[string]any{"parent_id": parent, "name": p.Name, "description": p.Description, "color": p.Color, "archived": p.Status == "done"})
 }
 func (c *openTodoClient) deleteProject(p project) error {
 	return c.do(http.MethodDelete, "projects/"+ident(p.UID, 0), nil, nil)
